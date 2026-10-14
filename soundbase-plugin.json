@@ -1,0 +1,79 @@
+{
+  "manifestVersion": 1,
+  "id": "shure-axt600",
+  "name": "Shure AXT600",
+  "version": "0.1.0",
+  "license": "BUSL-1.1",
+  "platforms": [
+    "darwin-arm64",
+    "darwin-x64",
+    "win32-x64"
+  ],
+  "repository": "https://github.com/your-org/shure-axt600-plugin",
+  "maintainers": [
+    {
+      "name": "Darío Hernández",
+      "email": "dario.hernandez.martinez.1990@gmail.com"
+    }
+  ],
+  "contract": {
+    "core": "1.4",
+    "modules": {
+      "SpectrumAnalyzer": "1.2"
+    }
+  },
+  "runtime": {
+    "type": "node",
+    "entrypoint": "main.js"
+  },
+  "deployment": [
+    "managed"
+  ],
+  "template": {
+    "name": "soundbase-plugin-template",
+    "version": "1.0.15"
+  },
+  "products": [
+    {
+      "deviceTypeId": "plugin:shure-axt600/axt600",
+      "manufacturer": {
+        "id": "shure",
+        "name": "Shure"
+      },
+      "model": {
+        "id": "axt600",
+        "name": "AXT600",
+        "displayName": "Shure AXT600"
+      },
+      "family": {
+        "id": "axient",
+        "name": "Axient"
+      },
+      "capabilities": {
+        "spectrumAnalyzer": true
+      },
+      "traits": {
+        "isSpectrumAnalyzer": true
+      }
+    }
+  ],
+  "pluginConfigFields": [
+    {
+      "id": "simulate",
+      "type": "checkbox",
+      "label": "Simulated AXT600",
+      "default": false,
+      "help": "Adds a pretend AXT600 to the device picker, with two antennas and a realistic scan speed, so the plugin can be tried without the hardware."
+    }
+  ],
+  "stateKeys": [],
+  "deviceConfigFields": [
+    {
+      "id": "host",
+      "type": "textinput",
+      "label": "IP address",
+      "required": true,
+      "help": "The AXT600's address, shown on its front panel under Network."
+    }
+  ]
+}
