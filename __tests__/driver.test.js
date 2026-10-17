@@ -235,7 +235,30 @@ test('interfaces in the unit\'s subnet are tried, wired before Wi-Fi', () => {
   assert.deepEqual(interfacesFacing('172.16.0.9', interfaces), []);
 });
 
-test('the session finds the interface the unit hears', async (t) => {
+// A second loopback address stands in for a second network interface. Linux
+// answers on all of 127/8; macOS only on 127.0.0.1, so there these are skipped.
+const canBind = async (address) => {
+  const dgram = await import('node:dgram');
+  const s = dgram.createSocket('udp4');
+  try {
+    await new Promise((resolve, reject) => {
+      s.once('error', reject);
+      s.bind(0, address, resolve);
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try {
+      s.close();
+    } catch {
+      // never bound
+    }
+  }
+};
+const secondLoopback = await canBind('127.0.0.2');
+
+test('the session finds the interface the unit hears', { skip: !secondLoopback && 'no 127.0.0.2 on this system' }, async (t) => {
   const unit = await startFakeAxt600({ onlyFrom: '127.0.0.1' });
   t.after(() => unit.close());
   const lines = [];
@@ -254,7 +277,7 @@ test('the session finds the interface the unit hears', async (t) => {
   await session.close();
 });
 
-test('no answer on any of two interfaces explains the shared subnet', async (t) => {
+test('no answer on any of two interfaces explains the shared subnet', { skip: !secondLoopback && 'no 127.0.0.2 on this system' }, async (t) => {
   const unit = await startFakeAxt600({ onlyFrom: '127.0.0.9' });
   t.after(() => unit.close());
   const session = new SdtSession({
