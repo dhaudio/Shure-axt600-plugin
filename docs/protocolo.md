@@ -85,7 +85,7 @@ total, contándose a sí mismo.
 | `0x01070110` | progreso | evento, 0–100 % en pasos de 5 |
 | `0x01070131` | escaneando | evento, 1 durante el escaneo |
 | `0x1fffffff` | suscripción a los datos del escaneo | |
-| `0x10000000 + i` | datos | evento de rango: int16 big-endian, décimas de dBm |
+| `0x10000000 + i` | datos | evento de rango: int16 big-endian, décimas de dBm. El primer punto está en **470 MHz + i × 25 kHz**; los siguientes, a un paso de escaneo |
 
 El equipo no responde a un `SET`. Wireless Workbench añade detrás un `GET` de la
 dirección 0 (de 1 byte), que el equipo contesta con `GET_FAIL`: esa respuesta
@@ -101,29 +101,38 @@ indica que los `SET` anteriores ya se han procesado. El plugin hace lo mismo.
   segunda vuelta trae el máximo de las dos antenas. El plugin se queda con el
   último valor de cada punto y no puede separar las antenas A y B.
 - La pasada termina cuando el progreso llega a 100 %. Después empieza otra.
-- 470–952 MHz a 25 kHz tardó **62 s** (el datasheet dice 64 s).
+- 470–952 MHz a 25 kHz tardó **62 s** (el datasheet dice 64 s); 470–616 MHz a
+  200 kHz, **unos 7 s** por pasada.
+- Los módulos empiezan en frecuencias fijas: 470, 518, 578, 638, 698, 740, 790
+  y 925 MHz. Por eso el índice de un bloque se cuenta en la rejilla de 25 kHz
+  de toda la banda (1920 = 518 MHz) aunque el paso sea otro, y dentro del
+  bloque los puntos van a un paso de escaneo.
 
-## Lo que falta confirmar con el equipo
+## Probado con el equipo (17-10-2026, firmware 2.1.41)
 
-El script `npm run probe -- <IP>` responde a casi todo esto. Antes de
-ejecutarlo hay que cerrar Wireless Workbench.
+Con `npm run probe`:
 
-1. **Si basta con anunciarse como SoundBase.** Sin anunciarse, el equipo no
-   contestó al `JOIN`. Con Wireless Workbench abierto sí contestó, pero entonces
-   rechazó los ajustes del escaneo (DMP *reason 5*), porque WWB tenía el
-   escáner. El plugin ahora se anuncia; falta confirmar que el equipo no
-   exige que sea Wireless Workbench.
-2. **Pasos de 200 kHz y 1 MHz.** En la captura, Wireless Workbench escaneó a
-   25 kHz todo el rango aunque se le pidió 470–616 a 200 kHz. Falta ver que el
-   equipo acepta otro paso y cómo numera entonces los puntos: por pasos desde
-   el inicio (lo que espera el plugin) o sobre la rejilla de 25 kHz desde
-   470 MHz. El plugin detecta lo segundo solo y lo anota en el log.
-3. **865–925 MHz no llegó nunca.** En la pasada de 25 kHz, ese tramo no se
-   envió y el progreso llegó igualmente al 100 %. Puede ser una restricción de
-   la región de la unidad. El plugin lo rellena con el suelo de ruido y avisa.
-4. **Exclusividad.** No se sabe si dos controladores pueden escanear a la vez.
-   Wireless Workbench no reclama el escáner como hace con el AD600.
-5. **Qué antena es cuál**, y el significado de `0x01070109` y `0x01070108`.
+- El equipo acepta la sesión del plugin: JOIN, CONNECT DMP, lectura del modelo
+  y el firmware. Recién encendido tarda en aceptar sesiones aunque ya se
+  anuncie; el plugin reintenta.
+- Acepta el rango y el paso de 200 kHz, y escanea. Las pasadas terminan al
+  100 % y se repiten.
+- Con Wireless Workbench abierto, rechaza los ajustes del escaneo con DMP
+  *reason 5*: hay que cerrarlo. El plugin para un escaneo en marcha antes de
+  escribir y lo explica si aun así se rechazan.
+
+## Lo que falta confirmar
+
+1. **El origen del índice con un inicio distinto de 470 MHz**
+   (`npm run probe -- <IP> --start 500 --stop 600`). El plugin supone la
+   rejilla de la banda y, si un bloque cae fuera del escaneo, cuenta desde el
+   inicio y lo anota en el log.
+2. **Si hace falta anunciarse por SLP.** El plugin lo hace, como Wireless
+   Workbench. No está claro si el equipo lo exige.
+3. **865–925 MHz no llegó nunca** en una pasada de 25 kHz de toda la banda.
+   Puede ser cosa de la región de la unidad. El plugin rellena ese tramo con el
+   suelo de ruido y avisa.
+4. **Qué antena es cuál**, y qué significan `0x01070109` y `0x01070108`.
 
 ## Volver a capturar
 

@@ -297,7 +297,9 @@ export async function startFakeAxt600({
         for (const run of runs) {
           const values = Buffer.alloc(run.values.length * 2);
           run.values.forEach((v, i) => values.writeInt16BE(Math.round(v * 10), 2 * i));
-          const head = Buffer.concat([u32(0x10000000 + run.from), u32(1), u32(run.values.length)]);
+          // the first point's place on the band's 25 kHz grid from 470 MHz
+          const gridIndex = Math.round((startHz + run.from * stepHz - 470e6) / 25e3);
+          const head = Buffer.concat([u32(0x10000000 + gridIndex), u32(1), u32(run.values.length)]);
           wrap(true, [dmpBlock(pdu(DMP.EVENT, 1, Buffer.from([0x22]), Buffer.concat([head, values])))]);
         }
         const pct = Math.floor(((k + 1) / tiles.length) * 20) * 5;

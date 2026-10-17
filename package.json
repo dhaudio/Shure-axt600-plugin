@@ -1,6 +1,6 @@
 {
   "name": "soundbase-plugin-shure-axt600",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "SoundBase plugin: Shure AXT600 Axient Spectrum Manager as a live spectrum analyzer.",
   "license": "BUSL-1.1",
   "type": "module",

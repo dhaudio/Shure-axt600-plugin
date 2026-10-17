@@ -296,27 +296,29 @@ const scanEvent = (index, values) => {
   return { vector: 4, single: false, address: 0x10000000 + index, increment: 1, count: values.length, value };
 };
 
-test('scan indexes count steps from the start', () => {
-  const link = new Axt600NetworkLink({ host: 'x' });
-  link.scan = { startHz: 500e6, stepHz: 200e3, deviceCount: 6 };
+test('a scan tile starts on the 25 kHz band grid; its points are a scan step apart', () => {
+  // as a unit scanning 470–616 MHz at 200 kHz reported it: index 1920 = 518 MHz
+  const link = new Axt600NetworkLink({ host: 'x', log: () => {} });
+  link.scan = { startHz: 470e6, stepHz: 200e3, deviceCount: 731 };
   const tiles = [];
   link.onTile = (tl) => tiles.push(tl);
-  link.handleDmp([scanEvent(2, [-90, -91])]);
-  assert.deepEqual(tiles, [{ startHz: 500.4e6, stepHz: 200e3, amplitudesDbm: [-90, -91] }]);
+  link.handleDmp([scanEvent(1920, [-90, -91, -92])]);
+  link.handleDmp([scanEvent(0, [-80])]);
+  assert.deepEqual(tiles, [
+    { startHz: 518e6, stepHz: 200e3, amplitudesDbm: [-90, -91, -92] },
+    { startHz: 470e6, stepHz: 200e3, amplitudesDbm: [-80] },
+  ]);
+  assert.equal(link.indexOrigin, 'band');
 });
 
-test('scan indexes past the end are read on the 25 kHz band grid instead', () => {
+test('a tile that would land outside the scan is read from the scan start', () => {
   const link = new Axt600NetworkLink({ host: 'x', log: () => {} });
-  link.scan = { startHz: 500e6, stepHz: 200e3, deviceCount: 6 };
+  link.scan = { startHz: 700e6, stepHz: 200e3, deviceCount: 501 }; // 700–800 MHz
   const tiles = [];
   link.onTile = (tl) => tiles.push(tl);
-  // 470 MHz + 1200 x 25 kHz = 500 MHz; every eighth point is on the 200 kHz axis
-  link.handleDmp([scanEvent(1200, [-90, -1, -1, -1, -1, -1, -1, -1, -91])]);
-  assert.equal(link.indexMode, 'absolute');
-  assert.deepEqual(
-    tiles.map((tl) => [tl.startHz, tl.amplitudesDbm[0]]),
-    [[500e6, -90], [500.2e6, -91]]
-  );
+  link.handleDmp([scanEvent(8, [-90, -91])]); // 470.2 MHz on the band grid: not this scan
+  assert.equal(link.indexOrigin, 'start');
+  assert.deepEqual(tiles, [{ startHz: 700.2e6, stepHz: 200e3, amplitudesDbm: [-90, -91] }]);
 });
 
 test('a pass ends when progress reaches 100 %', () => {

@@ -16,7 +16,9 @@
 //   0x01070110  scan progress, %       u8     event, 0…100 in steps of 5
 //   0x01070131  scanning               u8     event, 1 while a scan runs
 //   0x1fffffff  scan data subscription
-//   0x10000000+i  scan data            event, range: int16 BE tenths of dBm
+//   0x10000000+i  scan data            event, range: int16 BE tenths of dBm;
+//                                      the first point at 470 MHz + i × 25 kHz,
+//                                      the rest one scan step apart
 //
 // A pass is reported twice over: the first half of it carries one antenna, the
 // second half the same points again as the stronger of the two. The second
@@ -51,8 +53,8 @@ export const P = {
 };
 
 const DATA_END = 0x1fffffff;
-const ABSOLUTE_ORIGIN_HZ = 470_000_000;
-const ABSOLUTE_STEP_HZ = 25_000;
+const GRID_ORIGIN_HZ = 470_000_000;
+const GRID_HZ = 25_000;
 
 export class Axt600NetworkLink {
   constructor({ host, cid = null, port = null, slp, log = () => {} }) {
@@ -63,7 +65,7 @@ export class Axt600NetworkLink {
     this.log = log;
     this.session = null;
     this.scan = null;
-    this.indexMode = 'relative';
+    this.indexOrigin = 'band';
     this.lastProgress = null;
     /** assigned by the user; called when the link dies unprompted */
     this.onFatal = null;
@@ -165,7 +167,7 @@ export class Axt600NetworkLink {
       }
     }
     this.scan = { startHz, stepHz, deviceCount };
-    this.indexMode = 'relative';
+    this.indexOrigin = 'band';
     this.log(`scan set: ${startKhz}–${stopKhz} kHz, step ${stepKhz} kHz`);
     return { ...this.scan };
   }
@@ -223,7 +225,7 @@ export class Axt600NetworkLink {
   async stopScan() {
     this.onTile = null;
     this.onPassEnd = null;
-    if (!this.session) return;
+    if (!this.session?.dmpConnected) return;
     try {
       await this.session.set([[P.SCAN_STOP, u8(0)]]);
       this.session.unsubscribe([P.SCAN_DATA_SUB]);
@@ -268,26 +270,22 @@ export class Axt600NetworkLink {
     for (let k = 0; k < n; k += 1) amplitudesDbm[k] = value.readInt16BE(2 * k) / 10;
     const index = address - P.SCAN_DATA_BASE;
     const { startHz, stepHz, deviceCount } = this.scan;
+    const stopHz = startHz + (deviceCount - 1) * stepHz;
 
-    // The index counts scan steps from the start — or, if the unit numbers
-    // its points on the whole band's 25 kHz grid instead, it will run past
-    // the end of this scan, and from then on is read that way.
-    if (this.indexMode === 'relative' && index + n > deviceCount && stepHz !== ABSOLUTE_STEP_HZ) {
-      this.indexMode = 'absolute';
-      this.log(
-        `scan data index ${index} is past this scan's ${deviceCount} points: ` +
-          `reading indexes on the 470 MHz + n × 25 kHz grid`
-      );
+    // A tile's index places its first point on the band's 25 kHz grid from
+    // 470 MHz — the eight scanning modules start at fixed frequencies (index
+    // 1920 is 518 MHz whatever the step) — and its points then follow one scan
+    // step apart. Measured on a unit scanning 470–616 MHz at 200 kHz.
+    // Should a unit count from the scan's own start instead, a tile would
+    // land outside the scan; then indexes are read from the start.
+    let first = GRID_ORIGIN_HZ + index * GRID_HZ;
+    if (this.indexOrigin === 'start' || first < startHz - stepHz / 2 || first > stopHz + stepHz / 2) {
+      if (this.indexOrigin !== 'start') {
+        this.indexOrigin = 'start';
+        this.log(`scan data index ${index} falls outside the scan: reading indexes from the scan start`);
+      }
+      first = startHz + index * GRID_HZ;
     }
-    if (this.indexMode === 'relative') {
-      this.onTile({ startHz: startHz + index * stepHz, stepHz, amplitudesDbm });
-      return;
-    }
-    for (let k = 0; k < n; k += 1) {
-      const hz = ABSOLUTE_ORIGIN_HZ + (index + k) * ABSOLUTE_STEP_HZ;
-      const offset = hz - startHz;
-      if (offset < 0 || offset % stepHz !== 0) continue;
-      this.onTile({ startHz: hz, stepHz, amplitudesDbm: [amplitudesDbm[k]] });
-    }
+    this.onTile({ startHz: first, stepHz, amplitudesDbm });
   }
 }

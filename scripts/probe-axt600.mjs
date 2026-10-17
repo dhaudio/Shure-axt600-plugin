@@ -143,7 +143,7 @@ async function main() {
   await Promise.race([done, new Promise((r) => (link.onFatal = (e) => { fatal = e; log(`LOST: ${e.message}`); r(); }))]);
   clearTimeout(timer);
   report.misaligned = assembler.misaligned;
-  report.indexMode = link.indexMode;
+  report.indexOrigin = link.indexOrigin;
 }
 
 try {

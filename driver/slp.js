@@ -144,7 +144,17 @@ export class SlpListener {
     const socket = this.#socket;
     if (!socket) return false;
     try {
-      if (this.multicast && from) socket.setMulticastInterface(from);
+      if (this.multicast && from && this.multicastFrom !== from) {
+        try {
+          socket.setMulticastInterface(from);
+          this.multicastFrom = from;
+        } catch (err) {
+          // macOS refuses some interface addresses; the default route still
+          // reaches a unit on the same subnet
+          if (!this.warnedInterface) this.log(`SLP advert via the default interface (${err.code ?? err.message})`);
+          this.warnedInterface = true;
+        }
+      }
       await new Promise((resolve, reject) =>
         socket.send(packet, target[1], target[0], (err) => (err ? reject(err) : resolve()))
       );
