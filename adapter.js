@@ -7,7 +7,14 @@
 // one speaks ACN to the unit (driver/axt600-link.js); a simulator stands in
 // for it when there is no unit.
 
-import { createLink, SIMULATED_HOST, slpListener } from './driver/link.js';
+import {
+  cidFromDeviceId,
+  createLink,
+  deviceIdFor,
+  SIMULATED_HOST,
+  slpListener,
+} from './driver/link.js';
+import { cidFromString } from './driver/acn.js';
 import {
   MAX_FREQUENCY_HZ,
   MIN_FREQUENCY_HZ,
@@ -43,7 +50,9 @@ export async function discoverDevices(pluginConfig = {}) {
   const slp = slpListener((m) => logLine('warn', m));
   await slp.start();
   const found = slp.devices().map((advert) => ({
-    id: `net:${advert.host}`,
+    // the component id, not the address: a unit moved to another IP is still
+    // the same device in the user's projects
+    id: deviceIdFor(advert.cid),
     name: `${advert.uacn} (${advert.host})`,
     product: PRODUCT,
     transport: { kind: 'network', host: advert.host, port: advert.port },
@@ -66,7 +75,7 @@ export function createSpectrumAnalyzerAdapter(device) {
 class Axt600Adapter {
   constructor(device) {
     this.device = device;
-    this.host = addressOf(device);
+    ({ host: this.host, cid: this.cid } = addressOf(device));
     this.link = null;
     this.plan = null;
     this.assembler = null;
@@ -82,6 +91,7 @@ class Axt600Adapter {
   async open() {
     this.link = createLink(this.device, {
       host: this.host,
+      cid: this.cid,
       timeScale: simTimeScale(),
       log: (m) => logLine('info', `[${this.device.id}] ${m}`),
     });
@@ -262,17 +272,23 @@ function gapWarning(missing) {
 }
 
 /**
- * Where the unit is. Addressing comes from the device the host asked for —
- * `device.config.host`, filled in from the SoundBase project — or from an id
- * that already carries it (`net:<ip>`). Never from this machine.
+ * Who and where the unit is. A discovered unit is known by its component id
+ * (`acn:<id>`) and found at whatever address it announces; one added by hand
+ * comes with its address — `device.config.host`, filled in from the SoundBase
+ * project — or an id that carries it (`net:<ip>`). Never from this machine.
  */
 function addressOf(device) {
-  const host = device.config?.host;
-  if (typeof host === 'string' && host.trim()) return host.trim();
-  const match = /^net:(.+)$/.exec(device.id ?? '');
-  if (match) return match[1];
-  if (/^sim:/.test(device.id ?? '')) return SIMULATED_HOST;
-  throw new Error(
-    `device ${device.id} has no address: set its IP address in the device settings`
-  );
+  const configured = device.config?.host;
+  const host =
+    typeof configured === 'string' && configured.trim()
+      ? configured.trim()
+      : (/^net:(.+)$/.exec(device.id ?? '')?.[1] ?? null);
+  const cid = cidFromDeviceId(device.id) ?? cidFromString(device.config?.cid);
+  if (/^sim:/.test(device.id ?? '')) return { host: SIMULATED_HOST, cid: null };
+  if (!host && !cid) {
+    throw new Error(
+      `device ${device.id} has no address: set its IP address in the device settings`
+    );
+  }
+  return { host, cid };
 }

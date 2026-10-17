@@ -13,7 +13,13 @@ import {
 } from '../driver/scan-plan.js';
 import { SweepAssembler } from '../driver/sweep-assembler.js';
 import { SimulatedAxt600 } from '../driver/simulated-axt600.js';
-import { Axt600NetworkLink, createLink, isSimulated } from '../driver/link.js';
+import {
+  Axt600NetworkLink,
+  cidFromDeviceId,
+  createLink,
+  deviceIdFor,
+  isSimulated,
+} from '../driver/link.js';
 import { SdtSession, interfacesFacing } from '../driver/sdt-session.js';
 import { SlpListener, buildAdvert, parseAdvert } from '../driver/slp.js';
 import { startFakeAxt600 } from '../driver/fake-axt600.js';
@@ -231,6 +237,36 @@ test('a real AXT600 advert parses to its address, port and component id', () => 
   assert.equal(advert.fctn, 'AXT600');
   assert.equal(advert.cid.toString('hex'), 'a1b2c3d4000011dda000000eddcccccc');
   assert.equal(parseAdvert(Buffer.from('(acn-fctn=WWB6)')), null);
+});
+
+test('a unit is found by its component id at whatever address it announces', async () => {
+  const dgram = await import('node:dgram');
+  const port = await freePort();
+  const slp = new SlpListener({ port, multicast: false });
+  await slp.start();
+  const tell = (host) =>
+    new Promise((r) => {
+      const s = dgram.createSocket('udp4');
+      const ad = Buffer.from(REAL_ADVERT.toString('latin1').replaceAll('192.168.1.3', host), 'latin1');
+      s.send(ad, port, '127.0.0.1', () => s.close(r));
+    });
+  const cid = parseAdvert(REAL_ADVERT).cid;
+  await tell('192.168.1.3');
+  await delay(20);
+  assert.equal((await slp.advertForCid(cid, 100)).host, '192.168.1.3');
+  await tell('192.168.3.3'); // the same unit, moved to another network
+  await delay(20);
+  assert.equal((await slp.advertForCid(cid, 100)).host, '192.168.3.3');
+  assert.equal(slp.devices().length, 1, 'still one unit');
+  assert.equal(await slp.advertForCid(Buffer.alloc(16), 50), null);
+  slp.close();
+});
+
+test('device ids carry the component id and survive a round trip', () => {
+  const cid = Buffer.from('a1b2c3d4000011dda000000eddcccccc', 'hex');
+  assert.equal(deviceIdFor(cid), 'acn:a1b2c3d4000011dda000000eddcccccc');
+  assert.ok(cidFromDeviceId(deviceIdFor(cid)).equals(cid));
+  assert.equal(cidFromDeviceId('net:192.168.3.3'), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -548,6 +584,27 @@ test('a dropped link is reported as fatal', async () => {
   assert.equal(fatal.length, 1);
   assert.match(fatal[0].message, /lost the connection/);
   await adapter.close();
+});
+
+test('a device known only by its component id needs no address', () => {
+  assert.doesNotThrow(() =>
+    createSpectrumAnalyzerAdapter({ id: 'acn:a1b2c3d4000011dda000000eddcccccc' })
+  );
+});
+
+test('the link finds a unit by component id alone', async (t) => {
+  const slpPort = await freePort();
+  const unit = await startFakeAxt600({ slpPort });
+  const slp = new SlpListener({ port: slpPort, multicast: false });
+  t.after(async () => {
+    slp.close();
+    await unit.close();
+  });
+  const link = new Axt600NetworkLink({ host: null, cid: unit.cid, slp });
+  const identity = await link.connect();
+  assert.equal(identity.model, 'AXT600');
+  assert.equal(link.host, unit.host);
+  link.close();
 });
 
 test('a device with no address says so', () => {

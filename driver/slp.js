@@ -76,7 +76,7 @@ export function parseAdvert(buf) {
  */
 export class SlpListener {
   #socket = null;
-  #seen = new Map(); // host -> { advert, at }
+  #seen = new Map(); // component id (hex) -> { advert, at }: a unit that moves keeps its entry
   #waiters = new Set();
   #starting = null;
 
@@ -123,12 +123,27 @@ export class SlpListener {
   }
 
   /** The advert for this host, waiting for one if none has been heard yet. */
-  async advertFor(host, timeoutMs = 9_000) {
+  advertFor(host, timeoutMs = 9_000) {
+    return this.#lookup((a) => a.host === host, timeoutMs);
+  }
+
+  /**
+   * The current advert of the unit with this component id, wherever it is now —
+   * its address is whatever it last announced.
+   */
+  advertForCid(cid, timeoutMs = 9_000) {
+    return this.#lookup((a) => a.cid.equals(cid), timeoutMs);
+  }
+
+  async #lookup(match, timeoutMs) {
     await this.start();
-    const known = this.#seen.get(host);
-    if (known && Date.now() - known.at < FORGET_AFTER_MS) return known.advert;
+    const now = Date.now();
+    const known = [...this.#seen.values()]
+      .filter((s) => now - s.at < FORGET_AFTER_MS && match(s.advert))
+      .sort((a, b) => b.at - a.at)[0];
+    if (known) return known.advert;
     return new Promise((resolve) => {
-      const waiter = { host, resolve };
+      const waiter = { match, resolve };
       waiter.timer = setTimeout(() => {
         this.#waiters.delete(waiter);
         resolve(null);
@@ -183,9 +198,9 @@ export class SlpListener {
   #heard(msg) {
     const advert = parseAdvert(msg);
     if (!advert) return;
-    this.#seen.set(advert.host, { advert, at: Date.now() });
+    this.#seen.set(advert.cid.toString('hex'), { advert, at: Date.now() });
     for (const w of [...this.#waiters]) {
-      if (w.host === advert.host) {
+      if (w.match(advert)) {
         clearTimeout(w.timer);
         this.#waiters.delete(w);
         w.resolve(advert);

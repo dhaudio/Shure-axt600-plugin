@@ -37,7 +37,8 @@ const manifest = JSON.parse(
   readFileSync(new URL('../soundbase-plugin.json', import.meta.url), 'utf8')
 );
 
-const DEVICE_ID = `net:${unit.host}`;
+// discovered units are known by their component id, not their address
+const DEVICE_ID = `acn:${unit.cid.toString('hex')}`;
 const DEVICE_PATH = `/devices/${encodeURIComponent(DEVICE_ID)}`;
 const SIM_PATH = `/devices/${encodeURIComponent(SIMULATED_DEVICE_ID)}`;
 const START_HZ = 470_000_000;
@@ -278,6 +279,20 @@ test('the simulated AXT600 sweeps too', async (t) => {
   await sweeping(t, SIM_PATH);
   const { body } = await traceAfter(0, SIM_PATH);
   assert.equal(body.pointCount, 731);
+});
+
+test('a unit added by hand with its address works too', async (t) => {
+  const id = `net:${unit.host}`;
+  const added = await request('POST', '/devices', { id, product: PRODUCT, config: { host: unit.host } });
+  assert.equal(added.status, 201);
+  t.after(() => request('DELETE', `/devices/${encodeURIComponent(id)}`));
+  const { status, body } = await request('POST', `/devices/${encodeURIComponent(id)}/configuration`, {
+    startHz: START_HZ,
+    stopHz: STOP_HZ,
+    rbwHz: 1_000_000,
+  });
+  assert.equal(status, 200);
+  assert.equal(body.pointCount, 147);
 });
 
 test('an address with no AXT600 behind it fails with a reason', async (t) => {

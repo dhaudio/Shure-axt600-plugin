@@ -48,7 +48,9 @@ SB_AXT600_MOCK=1 npm start # un AXT600 simulado, para probarlo con curl
 ```
 
 Dentro de SoundBase, activa **Simulated AXT600** en los ajustes del plugin.
-Los AXT600 reales de la red aparecen solos en el selector de dispositivos.
+Los AXT600 reales de la red aparecen solos en el selector de dispositivos. Se
+identifican por su ID ACN, no por su IP, así que si le cambias la IP a un
+equipo, tus proyectos lo siguen reconociendo.
 
 ## Cómo se traducen los ajustes de SoundBase
 

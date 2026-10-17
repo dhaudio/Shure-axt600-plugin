@@ -22,6 +22,15 @@ import { Axt600NetworkLink } from './axt600-link.js';
 import { SlpListener, SLP_PORT } from './slp.js';
 import { cidFromString } from './acn.js';
 
+/** A unit's device id: its ACN component id, which no change of address alters. */
+export const deviceIdFor = (cid) => `acn:${cid.toString('hex')}`;
+
+/** The component id in an `acn:` device id, or null. */
+export const cidFromDeviceId = (id) => {
+  const m = /^acn:([0-9a-f]{32})$/i.exec(id ?? '');
+  return m ? Buffer.from(m[1], 'hex') : null;
+};
+
 export const SIMULATED_HOST = 'simulated';
 
 /** Is this device the pretend one? */
@@ -49,11 +58,11 @@ export function slpListener(log) {
  * The link for a device. `timeScale` speeds up the simulator: 1 is real time,
  * which is what someone looking at the plugin in SoundBase should see.
  */
-export function createLink(device, { host, timeScale = 1, log } = {}) {
+export function createLink(device, { host, cid = null, timeScale = 1, log } = {}) {
   if (isSimulated(device)) return new SimulatedAxt600({ timeScale });
   return new Axt600NetworkLink({
     host,
-    cid: cidFromString(device?.config?.cid),
+    cid: cid ?? cidFromString(device?.config?.cid),
     slp: slpListener(log),
     log,
   });

@@ -75,18 +75,31 @@ export class Axt600NetworkLink {
     let cid = this.cid;
     let port = this.port;
     let name = null;
-    if (!cid || !port) {
-      const advert = await this.slp?.advertFor(this.host);
-      if (!advert && !cid) {
+    if (!port || !this.host) {
+      // a unit known by its component id is wherever it last announced itself;
+      // one known only by address is looked up there
+      const advert = cid
+        ? await this.slp?.advertForCid(cid)
+        : await this.slp?.advertFor(this.host);
+      if (advert) {
+        if (this.host && advert.host !== this.host) {
+          this.log(`the AXT600 is now at ${advert.host} (was ${this.host})`);
+        }
+        this.host = advert.host;
+        cid ??= advert.cid;
+        port ??= advert.port;
+        name = advert.uacn ?? null;
+      } else if (!cid || !this.host) {
         throw new SessionError(
-          `No AXT600 is advertising at ${this.host}. Check that it is switched on, that ` +
-            `its address is right, and that this computer is on the same network (subnet).`,
+          cid
+            ? `The AXT600 with component ID ${cidToString(cid)} is not announcing itself on ` +
+                `any network this computer is on. Check that it is switched on and cabled to ` +
+                `this computer's network.`
+            : `No AXT600 is advertising at ${this.host}. Check that it is switched on, that ` +
+                `its address is right, and that this computer is on the same network (subnet).`,
           'not_found'
         );
       }
-      cid ??= advert.cid;
-      port ??= advert?.port;
-      name = advert?.uacn ?? null;
     }
 
     this.session = new SdtSession({
