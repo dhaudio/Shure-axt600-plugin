@@ -9,7 +9,7 @@
     "darwin-x64",
     "win32-x64"
   ],
-  "repository": "https://github.com/dhaudio/shure-axt600-plugin",
+  "repository": "https://github.com/dhaudio/Shure-axt600-plugin",
   "maintainers": [
     {
       "name": "Darío Hernández",
