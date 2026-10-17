@@ -17,9 +17,10 @@ Creado a partir de
 
 ## Antes de empezar
 
-- **El AXT600 en la misma red (subred) que el ordenador**, por cable. Si el
-  Wi-Fi del ordenador también está en esa subred, no pasa nada: el plugin busca
-  la interfaz por la que contesta el equipo.
+- **El AXT600 en la misma red (subred) que el ordenador**, por cable, y
+  **en una subred distinta de la del Wi-Fi**. Si los dos están en, por
+  ejemplo, 192.168.1.x, macOS envía al equipo por el Wi-Fi y no llega. Usa
+  otra subred para el equipo (por ejemplo 192.168.10.x) o apaga el Wi-Fi.
 - **Wireless Workbench cerrado** mientras el plugin escanea.
 - Node.js 20 o superior, para desarrollar y para `npm run probe`.
 

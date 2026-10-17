@@ -126,9 +126,12 @@ Con `npm run probe`:
 - Dos sesiones seguidas funcionan.
 - **Wi-Fi y cable en la misma subred.** Con el Wi-Fi del Mac también en
   192.168.1.x, macOS mandaba los paquetes hacia el equipo por el Wi-Fi y el
-  equipo no los recibía, aunque sus anuncios sí llegaban por el cable. El
-  plugin prueba ahora cada interfaz que esté en la subred del equipo, primero
-  las de cable.
+  equipo no los recibía, aunque sus anuncios sí llegaban por el cable. Enlazar
+  el socket a la dirección del cable **no basta en macOS**: lo intentamos y
+  los paquetes siguieron saliendo por el Wi-Fi. Solución: una subred propia
+  para el equipo (por ejemplo 192.168.10.x), apagar el Wi-Fi, o una ruta
+  (`sudo route -n add -host <IP> -interface <en…>`). El plugin lo detecta y lo
+  explica en el error.
 
 ## Lo que falta confirmar
 

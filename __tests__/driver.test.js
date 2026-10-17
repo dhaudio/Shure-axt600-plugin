@@ -248,9 +248,22 @@ test('the session finds the interface the unit hears', async (t) => {
   });
   await session.open();
   assert.ok(lines.some((l) => /answered on the interface at 127\.0\.0\.1/.test(l)), lines.join('\n'));
+  // (on Linux a bound source address picks the route; macOS needs the subnets apart)
   const values = await session.get([0x01000012]);
   assert.ok(values.get(0x01000012));
   await session.close();
+});
+
+test('no answer on any of two interfaces explains the shared subnet', async (t) => {
+  const unit = await startFakeAxt600({ onlyFrom: '127.0.0.9' });
+  t.after(() => unit.close());
+  const session = new SdtSession({
+    host: unit.host,
+    port: unit.port,
+    deviceCid: unit.cid,
+    localAddresses: ['127.0.0.2', '127.0.0.1'],
+  });
+  await assert.rejects(session.open(), (err) => err.code === 'ambiguous_route' && /Wi-Fi/.test(err.message));
 });
 
 test('a refused join says why', async (t) => {

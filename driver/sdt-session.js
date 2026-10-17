@@ -205,11 +205,15 @@ export class SdtSession {
     }
     if (!answer) {
       throw new SessionError(
-        `The AXT600 at ${this.host} did not answer` +
-          (tries.length > 1 ? ` on any of ${tries.join(', ')}` : '') +
-          `. Check that nothing else is connected to it (quit Wireless Workbench), ` +
-          `and if it still does not answer, power-cycle it.`,
-        'timeout'
+        tries.length > 1
+          ? `The AXT600 at ${this.host} did not answer. This computer has more than one ` +
+              `network connection in its subnet (${tries.join(', ')}), and the system sends ` +
+              `to the unit over only one of them — usually Wi-Fi — which the unit is not on. ` +
+              `Turn off Wi-Fi, or give the AXT600's network a subnet of its own ` +
+              `(for example 192.168.10.x on the unit and on the wired adapter).`
+          : `The AXT600 at ${this.host} did not answer. Check that nothing else is connected ` +
+              `to it (quit Wireless Workbench), and if it still does not answer, power-cycle it.`,
+        tries.length > 1 ? 'ambiguous_route' : 'timeout'
       );
     }
     if (answer.type === 'join-refuse') {
