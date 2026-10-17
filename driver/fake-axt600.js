@@ -47,6 +47,7 @@ export async function startFakeAxt600({
   timeScale = 0.002,
   refuseJoin = false,
   skip = null, // [fromHz, toHz]: a band the unit never reports, as a real one did
+  scanningAtStart = false, // as if another controller left it scanning
 } = {}) {
   const cid = Buffer.concat([randomBytes(4), Buffer.from('000011dda000000eddcccccc', 'hex')]);
   const socket = dgram.createSocket('udp4');
@@ -60,6 +61,9 @@ export async function startFakeAxt600({
     [0x01070220, str(';25;200;1000')],
     [0x01070201, u32(470_000)],
     [0x01070202, u32(25)],
+    [0x0107010f, Buffer.from([0])],
+    [0x01070210, Buffer.from([1])],
+    [0x01070200, Buffer.from([0])],
   ]);
   const scan = { startKhz: 470_000, stopKhz: 952_000, stepKhz: 25 };
   const state = {
@@ -200,11 +204,18 @@ export async function startFakeAxt600({
     for (const item of items) {
       switch (item.vector) {
         case DMP.GET:
-          if (props.has(item.address)) replies.push(dmpOne(DMP.GET_REPLY, item.address, props.get(item.address)));
+          if (item.address === 0x01070131) replies.push(dmpOne(DMP.GET_REPLY, item.address, Buffer.from([scanning ? 1 : 0])));
+          else if (props.has(item.address)) replies.push(dmpOne(DMP.GET_REPLY, item.address, props.get(item.address)));
           else replies.push(pdu(DMP.GET_FAIL, 1, Buffer.from([item.address > 0xff ? 0x02 : 0x00]),
             Buffer.concat([item.address > 0xff ? u32(item.address) : Buffer.from([item.address]), Buffer.from([1])])));
           break;
         case DMP.SET:
+          // a real unit refused the scan settings with reason 5 while scanning
+          if (scanning && item.address >= 0x01070100 && item.address <= 0x01070109 && item.address !== 0x01070103) {
+            state.refused = (state.refused ?? 0) + 1;
+            replies.push(pdu(DMP.SET_FAIL, 1, Buffer.from([0x02]), Buffer.concat([u32(item.address), Buffer.from([5])])));
+            break;
+          }
           state.sets.push([item.address, Buffer.from(item.value)]);
           applySet(item.address, item.value);
           break;
@@ -300,6 +311,11 @@ export async function startFakeAxt600({
       state.lastPct = -1;
       pass();
     });
+  }
+
+  if (scanningAtStart) {
+    scanning = true;
+    pass();
   }
 
   // SLP adverts, to a loopback port in tests

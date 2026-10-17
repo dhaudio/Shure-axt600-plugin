@@ -40,6 +40,11 @@ export const P = {
   SCAN_PROGRESS: 0x01070110,
   SCAN_STATE_A: 0x01070120,
   SCAN_RUNNING: 0x01070131,
+  SCAN_STATE_F: 0x0107010f,
+  SCAN_STATE_210: 0x01070210,
+  SCAN_STATE_200: 0x01070200,
+  SCAN_LAST_START: 0x01070201,
+  SCAN_LAST_STEP: 0x01070202,
   SCAN_DATA_SUB: 0x1fffffff,
   SCAN_DATA_BASE: 0x10000000,
 };
@@ -104,18 +109,55 @@ export class Axt600NetworkLink {
     };
   }
 
-  /** Write the scan settings. The AXT600 does not echo them; the plan fits it. */
+  /**
+   * Write the scan settings. The AXT600 does not echo them; the plan fits it.
+   *
+   * Done the way Wireless Workbench does it: read the scan state, subscribe to
+   * it, and only then write. A unit that is already scanning — left so by
+   * another controller, or by us before a retune — is stopped first, because
+   * a unit refused every setting with DMP reason 5 when written mid-scan.
+   */
   async configureScan({ startHz, stepHz, deviceCount }) {
     const startKhz = Math.round(startHz / 1000);
     const stepKhz = Math.round(stepHz / 1000);
     const stopKhz = startKhz + (deviceCount - 1) * stepKhz;
-    await this.session.set([
+    const settings = [
       [P.SCAN_START_KHZ, u32(startKhz)],
       [P.SCAN_STOP_KHZ, u32(stopKhz)],
       [P.SCAN_STEP_KHZ, u32(stepKhz)],
       [P.SCAN_RBW_KHZ, u32(stepKhz)],
       [P.SCAN_FLAGS, u8(0xff)],
-    ]);
+    ];
+
+    await this.#watchScanState();
+    let state = await this.#readScanState();
+    if (state.running) {
+      this.log('the unit is already scanning: stopping it before changing the scan');
+      await this.#stopAndWait();
+    }
+
+    try {
+      await this.session.set(settings);
+    } catch (err) {
+      if (err.code !== 'set_refused') throw err;
+      // once more, from a stopped scan, before giving up
+      this.log(`${err.message}; scan state ${JSON.stringify(state)}; stopping and retrying`);
+      await this.#stopAndWait();
+      state = await this.#readScanState();
+      try {
+        await this.session.set(settings);
+      } catch (again) {
+        if (again.code !== 'set_refused') throw again;
+        this.log(`refused again; scan state ${JSON.stringify(state)}`);
+        throw new SessionError(
+          `The AXT600 refused the scan settings ${startKhz}–${stopKhz} kHz, step ${stepKhz} kHz ` +
+            `(${again.reasons}). It is usually busy with another controller: quit Wireless ` +
+            `Workbench on every computer on this network, leave the unit's front panel on its ` +
+            `home screen, and start the scan again.`,
+          'scan_refused'
+        );
+      }
+    }
     this.scan = { startHz, stepHz, deviceCount };
     this.indexMode = 'relative';
     this.log(`scan set: ${startKhz}–${stopKhz} kHz, step ${stepKhz} kHz`);
@@ -126,14 +168,50 @@ export class Axt600NetworkLink {
     this.onTile = onTile;
     this.onPassEnd = onPassEnd;
     this.lastProgress = null;
-    await this.session.subscribe([
-      P.SCAN_STATE_A,
-      P.SCAN_PROGRESS,
-      P.SCAN_RUNNING,
-      P.SCAN_DATA_SUB,
-    ]);
+    await this.#watchScanState();
+    await this.session.subscribe([P.SCAN_DATA_SUB]);
     await this.session.set([[P.SCAN_GO, u8(0)]]);
     this.log('scan started');
+  }
+
+  /** The scan-state properties Wireless Workbench reads before a scan. */
+  async #readScanState() {
+    const v = await this.session.get([
+      P.SCAN_RUNNING,
+      P.SCAN_STATE_F,
+      P.SCAN_STATE_210,
+      P.SCAN_STATE_200,
+      P.SCAN_LAST_START,
+      P.SCAN_LAST_STEP,
+    ]);
+    const byte = (a) => (v.get(a)?.length ? v.get(a)[0] : null);
+    const word = (a) => (v.get(a)?.length >= 4 ? v.get(a).readUInt32BE(0) : null);
+    return {
+      running: byte(P.SCAN_RUNNING) === 1,
+      f: byte(P.SCAN_STATE_F),
+      s210: byte(P.SCAN_STATE_210),
+      s200: byte(P.SCAN_STATE_200),
+      lastStartKhz: word(P.SCAN_LAST_START),
+      lastStepKhz: word(P.SCAN_LAST_STEP),
+    };
+  }
+
+  async #watchScanState() {
+    if (this.watching) return;
+    await this.session.subscribe([P.SCAN_STATE_A, P.SCAN_PROGRESS, P.SCAN_RUNNING]);
+    this.watching = true;
+  }
+
+  /** Stop the unit's scan and wait (briefly) until it says it has stopped. */
+  async #stopAndWait() {
+    await this.session.set([[P.SCAN_STOP, u8(0)]]);
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline) {
+      const { running } = await this.#readScanState();
+      if (!running) return;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    this.log('the unit still reports scanning 3 s after being stopped');
   }
 
   async stopScan() {
@@ -142,7 +220,7 @@ export class Axt600NetworkLink {
     if (!this.session) return;
     try {
       await this.session.set([[P.SCAN_STOP, u8(0)]]);
-      this.session.unsubscribe([P.SCAN_DATA_SUB, P.SCAN_STATE_A, P.SCAN_PROGRESS]);
+      this.session.unsubscribe([P.SCAN_DATA_SUB]);
       this.log('scan stopped');
     } catch (err) {
       this.log(`stopping the scan: ${err.message}`);

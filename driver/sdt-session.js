@@ -242,10 +242,13 @@ export class SdtSession {
     this.#sendDmp(Buffer.concat([dmpPdus(DMP.SET, items), syncProbe()]));
     await done;
     if (failures.length) {
-      throw new SessionError(
-        `The AXT600 refused ${failures.map((f) => `${hex(f.address)} (reason ${f.reason})`).join(', ')}`,
+      const reasons = [...new Set(failures.map((f) => reasonName(f.reason)))].join(', ');
+      const err = new SessionError(
+        `The AXT600 refused ${failures.map((f) => hex(f.address)).join(', ')} (${reasons})`,
         'set_refused'
       );
+      err.reasons = reasons;
+      throw err;
     }
   }
 
@@ -467,5 +470,22 @@ export class SdtSession {
     this.onFatal = null;
   }
 }
+
+/** DMP reason codes, ANSI E1.17 */
+const REASONS = [
+  'success',
+  'unspecified',
+  'no such property',
+  'not readable',
+  'not writable',
+  'data error',
+  'maps not supported',
+  'space not available',
+  'not mappable',
+  'map not allocated',
+  'subscription not supported',
+  'no subscriptions supported',
+];
+const reasonName = (r) => `DMP reason ${r}: ${REASONS[r] ?? 'unknown'}`;
 
 const hex = (a) => `0x${a.toString(16).padStart(8, '0')}`;

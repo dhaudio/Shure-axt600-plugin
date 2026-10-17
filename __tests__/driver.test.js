@@ -231,6 +231,31 @@ test('the link finds the unit by its advert and scans it', async (t) => {
   assert.equal(sweeps[0].length, 731);
 });
 
+test('a unit left scanning is stopped before the scan settings are written', async (t) => {
+  // a real AXT600 refused every scan setting with DMP reason 5 in this state
+  const unit = await startFakeAxt600({ scanningAtStart: true });
+  t.after(() => unit.close());
+  const link = new Axt600NetworkLink({ host: unit.host, cid: unit.cid, port: unit.port, log: () => {} });
+  await link.connect();
+  assert.equal(unit.scanning, true);
+  await link.configureScan(planScan({ startHz: 470e6, stopHz: 616e6, rbwHz: 1e6 }));
+  assert.equal(unit.state.refused ?? 0, 0);
+  assert.deepEqual(unit.scan, { startKhz: 470_000, stopKhz: 616_000, stepKhz: 1000 });
+  link.close();
+});
+
+test('a refusal names the DMP reason', async (t) => {
+  const unit = await startFakeAxt600({ scanningAtStart: true });
+  t.after(() => unit.close());
+  const session = new SdtSession({ host: unit.host, port: unit.port, deviceCid: unit.cid });
+  await session.open();
+  await assert.rejects(
+    session.set([[0x01070100, Buffer.from([0, 7, 0x2b, 0xf0])]]),
+    (err) => err.code === 'set_refused' && /DMP reason 5: data error/.test(err.message)
+  );
+  await session.close();
+});
+
 const scanEvent = (index, values) => {
   const value = Buffer.alloc(values.length * 2);
   values.forEach((v, i) => value.writeInt16BE(Math.round(v * 10), 2 * i));
