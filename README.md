@@ -17,7 +17,9 @@ Creado a partir de
 
 ## Antes de empezar
 
-- **El AXT600 en la misma red (subred) que el ordenador**, por cable.
+- **El AXT600 en la misma red (subred) que el ordenador**, por cable. Si el
+  Wi-Fi del ordenador también está en esa subred, no pasa nada: el plugin busca
+  la interfaz por la que contesta el equipo.
 - **Wireless Workbench cerrado** mientras el plugin escanea.
 - Node.js 20 o superior, para desarrollar y para `npm run probe`.
 

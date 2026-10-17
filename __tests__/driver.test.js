@@ -14,7 +14,7 @@ import {
 import { SweepAssembler } from '../driver/sweep-assembler.js';
 import { SimulatedAxt600 } from '../driver/simulated-axt600.js';
 import { Axt600NetworkLink, createLink, isSimulated } from '../driver/link.js';
-import { SdtSession } from '../driver/sdt-session.js';
+import { SdtSession, interfacesFacing } from '../driver/sdt-session.js';
 import { SlpListener, buildAdvert, parseAdvert } from '../driver/slp.js';
 import { startFakeAxt600 } from '../driver/fake-axt600.js';
 import { createSpectrumAnalyzerAdapter } from '../adapter.js';
@@ -220,6 +220,36 @@ test('the session announces itself before joining, and re-joins an unanswered JO
   assert.ok(announced.length >= 2, 're-announced after the unanswered JOIN');
   assert.ok(announced[0].cid.equals(session.cid));
   assert.equal(announced[0].host, '127.0.0.1');
+  await session.close();
+});
+
+test('interfaces in the unit\'s subnet are tried, wired before Wi-Fi', () => {
+  // a Mac with Wi-Fi and a USB Ethernet adapter both in 192.168.1.x, as one was
+  const interfaces = {
+    lo0: [{ family: 'IPv4', address: '127.0.0.1', netmask: '255.0.0.0', internal: true }],
+    en0: [{ family: 'IPv4', address: '192.168.1.50', netmask: '255.255.255.0', internal: false }],
+    en9: [{ family: 'IPv4', address: '192.168.1.69', netmask: '255.255.255.0', internal: false }],
+    bridge100: [{ family: 'IPv4', address: '10.211.55.2', netmask: '255.255.255.0', internal: false }],
+  };
+  assert.deepEqual(interfacesFacing('192.168.1.3', interfaces), ['192.168.1.69', '192.168.1.50']);
+  assert.deepEqual(interfacesFacing('172.16.0.9', interfaces), []);
+});
+
+test('the session finds the interface the unit hears', async (t) => {
+  const unit = await startFakeAxt600({ onlyFrom: '127.0.0.1' });
+  t.after(() => unit.close());
+  const lines = [];
+  const session = new SdtSession({
+    host: unit.host,
+    port: unit.port,
+    deviceCid: unit.cid,
+    localAddresses: ['127.0.0.2', '127.0.0.1'],
+    log: (l) => lines.push(l),
+  });
+  await session.open();
+  assert.ok(lines.some((l) => /answered on the interface at 127\.0\.0\.1/.test(l)), lines.join('\n'));
+  const values = await session.get([0x01000012]);
+  assert.ok(values.get(0x01000012));
   await session.close();
 });
 

@@ -120,13 +120,19 @@ Con `npm run probe`:
 - Con Wireless Workbench abierto, rechaza los ajustes del escaneo con DMP
   *reason 5*: hay que cerrarlo. El plugin para un escaneo en marcha antes de
   escribir y lo explica si aun así se rechazan.
+- 470–616 MHz y 500–600 MHz a 200 kHz: pasadas completas, sin huecos, de unos
+  7 s. El índice de cada bloque se cuenta en la rejilla de 25 kHz desde
+  470 MHz también cuando el escaneo empieza en otra frecuencia.
+- Dos sesiones seguidas funcionan.
+- **Wi-Fi y cable en la misma subred.** Con el Wi-Fi del Mac también en
+  192.168.1.x, macOS mandaba los paquetes hacia el equipo por el Wi-Fi y el
+  equipo no los recibía, aunque sus anuncios sí llegaban por el cable. El
+  plugin prueba ahora cada interfaz que esté en la subred del equipo, primero
+  las de cable.
 
 ## Lo que falta confirmar
 
-1. **El origen del índice con un inicio distinto de 470 MHz**
-   (`npm run probe -- <IP> --start 500 --stop 600`). El plugin supone la
-   rejilla de la banda y, si un bloque cae fuera del escaneo, cuenta desde el
-   inicio y lo anota en el log.
+1. **Los pasos de 25 kHz y 1 MHz**, y los tiempos reales de cada uno.
 2. **Si hace falta anunciarse por SLP.** El plugin lo hace, como Wireless
    Workbench. No está claro si el equipo lo exige.
 3. **865–925 MHz no llegó nunca** en una pasada de 25 kHz de toda la banda.

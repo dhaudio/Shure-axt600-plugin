@@ -15,6 +15,7 @@
 // answers to wherever the packets came from.
 
 import dgram from 'node:dgram';
+import os from 'node:os';
 import { randomBytes as nodeRandomBytes } from 'node:crypto';
 import {
   DMP,
@@ -80,8 +81,16 @@ export class SdtSession {
    *                   controller (an SLP advert) before joining and every few
    *                   seconds after; `host` and `port` are our local address
    */
-  constructor({ host, port = DEFAULT_SDT_PORT, deviceCid, log = () => {}, randomBytes = nodeRandomBytes, announce = null }) {
+  /**
+   * @param localAddresses  local IPv4 addresses to try, in order. By default,
+   *                   every interface whose subnet holds the device — a Mac on
+   *                   Wi-Fi and a wired show network in the same 192.168.1.x
+   *                   sends to the unit over Wi-Fi unless the socket is bound
+   *                   to the wired address, and the unit never hears it.
+   */
+  constructor({ host, port = DEFAULT_SDT_PORT, deviceCid, log = () => {}, randomBytes = nodeRandomBytes, announce = null, localAddresses = null }) {
     this.announce = announce;
+    this.localAddresses = localAddresses;
     this.host = host;
     this.port = port;
     this.deviceCid = deviceCid;
@@ -116,32 +125,40 @@ export class SdtSession {
     }
   }
 
-  async #open() {
-    this.#socket = dgram.createSocket('udp4');
-    this.#socket.on('message', (msg, rinfo) => {
-      if (rinfo.address !== this.host) return;
+  async #bindSocket(address) {
+    try {
+      this.#socket?.close();
+    } catch {
+      // already closed
+    }
+    const socket = dgram.createSocket('udp4');
+    socket.on('message', (msg, rinfo) => {
+      if (rinfo.address !== this.host || socket !== this.#socket) return;
       this.#receive(msg);
     });
-    this.#socket.on('error', (err) => this.#die(err));
+    socket.on('error', (err) => {
+      if (socket === this.#socket) this.#die(err);
+    });
     await new Promise((resolve, reject) => {
-      this.#socket.once('error', reject);
-      this.#socket.bind(0, () => {
-        this.#socket.off('error', reject);
+      socket.once('error', reject);
+      socket.bind(0, address, () => {
+        socket.off('error', reject);
         resolve();
       });
     });
+    this.#socket = socket;
+  }
 
-    // 0. announce ourselves, as Wireless Workbench does two seconds before it joins
-    this.local = await this.#localAddress();
-    await this.#announce();
-    if (this.announce) await new Promise((r) => setTimeout(r, ANNOUNCE_LEAD_MS));
+  async #open() {
+    const candidates = this.localAddresses ?? interfacesFacing(this.host);
+    const tries = candidates.length ? candidates : [undefined];
+    const attemptsEach = tries.length > 1 ? 2 : JOIN_ATTEMPTS;
 
-    // 1. our channel: JOIN, and the device's JOIN_ACCEPT — resent, re-announced,
-    // if the unit does not answer
+    // the device's channel to us may open as soon as ours is accepted
     const theirJoin = this.#wait(
       (e) => e.type === 'join',
       'the AXT600 to open its channel',
-      STEP_TIMEOUT_MS * (JOIN_ATTEMPTS + 1)
+      STEP_TIMEOUT_MS * (JOIN_ATTEMPTS + 1) + tries.length * attemptsEach * JOIN_RETRY_MS
     );
     // awaited later; if an earlier step fails, its rejection is not a second error
     theirJoin.catch(() => {});
@@ -152,26 +169,46 @@ export class SdtSession {
       total: this.total,
       reliable: this.reliable,
     });
+
     let answer = null;
-    for (let attempt = 1; attempt <= JOIN_ATTEMPTS && !answer; attempt += 1) {
-      const accepted = this.#wait(
-        (e) => e.type === 'join-accept' || e.type === 'join-refuse',
-        'the AXT600 to accept the session',
-        JOIN_RETRY_MS
-      );
-      this.#sendRoot(joinPdu);
-      try {
-        answer = await accepted;
-      } catch (err) {
-        if (err.code !== 'timeout') throw err;
-        this.log(`no answer to JOIN (attempt ${attempt} of ${JOIN_ATTEMPTS})`);
-        await this.#announce();
+    for (const address of tries) {
+      await this.#bindSocket(address);
+      if (tries.length > 1) this.log(`trying the interface at ${address}`);
+
+      // 0. announce ourselves, as Wireless Workbench does two seconds before it joins
+      this.local = address
+        ? { host: address, port: this.#socket.address().port }
+        : await this.#localAddress();
+      await this.#announce();
+      if (this.announce) await new Promise((r) => setTimeout(r, ANNOUNCE_LEAD_MS));
+
+      // 1. our channel: JOIN, and the device's JOIN_ACCEPT — resent, re-announced
+      for (let attempt = 1; attempt <= attemptsEach && !answer; attempt += 1) {
+        const accepted = this.#wait(
+          (e) => e.type === 'join-accept' || e.type === 'join-refuse',
+          'the AXT600 to accept the session',
+          JOIN_RETRY_MS
+        );
+        this.#sendRoot(joinPdu);
+        try {
+          answer = await accepted;
+        } catch (err) {
+          if (err.code !== 'timeout') throw err;
+          this.log(`no answer to JOIN${address ? ` from ${address}` : ''} (attempt ${attempt} of ${attemptsEach})`);
+          await this.#announce();
+        }
+      }
+      if (answer) {
+        if (address) this.log(`the AXT600 answered on the interface at ${address}`);
+        break;
       }
     }
     if (!answer) {
       throw new SessionError(
-        `The AXT600 at ${this.host} did not answer. Check that nothing else is connected ` +
-          `to it (quit Wireless Workbench), and if it still does not answer, power-cycle it.`,
+        `The AXT600 at ${this.host} did not answer` +
+          (tries.length > 1 ? ` on any of ${tries.join(', ')}` : '') +
+          `. Check that nothing else is connected to it (quit Wireless Workbench), ` +
+          `and if it still does not answer, power-cycle it.`,
         'timeout'
       );
     }
@@ -550,5 +587,27 @@ const REASONS = [
   'no subscriptions supported',
 ];
 const reasonName = (r) => `DMP reason ${r}: ${REASONS[r] ?? 'unknown'}`;
+
+/**
+ * Local IPv4 addresses on interfaces whose subnet holds `host`, wired before
+ * wireless (macOS names Wi-Fi en0 on laptops; the rest is a guess at order,
+ * and every candidate is tried anyway).
+ */
+export function interfacesFacing(host, interfaces = os.networkInterfaces()) {
+  const toInt = (ip) => ip.split('.').reduce((n, o) => (n << 8) + Number(o), 0) >>> 0;
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return [];
+  const target = toInt(host);
+  const found = [];
+  for (const [name, list] of Object.entries(interfaces)) {
+    for (const i of list ?? []) {
+      if (i.family !== 'IPv4' || i.internal || !i.netmask) continue;
+      const mask = toInt(i.netmask);
+      if ((toInt(i.address) & mask) === (target & mask)) found.push({ name, address: i.address });
+    }
+  }
+  const wireless = (n) => /^(en0|wl|wlan|Wi-?Fi)/i.test(n);
+  found.sort((a, b) => wireless(a.name) - wireless(b.name));
+  return found.map((f) => f.address);
+}
 
 const hex = (a) => `0x${a.toString(16).padStart(8, '0')}`;
