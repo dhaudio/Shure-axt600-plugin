@@ -124,6 +124,7 @@ Con `npm run probe`:
   7 s. El índice de cada bloque se cuenta en la rejilla de 25 kHz desde
   470 MHz también cuando el escaneo empieza en otra frecuencia.
 - Dos sesiones seguidas funcionan.
+- **En SoundBase Desktop (v0.1.5): la traza en vivo funciona.**
 - **Wi-Fi y cable en la misma subred.** Con el Wi-Fi del Mac también en
   192.168.1.x, macOS mandaba los paquetes hacia el equipo por el Wi-Fi y el
   equipo no los recibía, aunque sus anuncios sí llegaban por el cable. Enlazar

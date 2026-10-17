@@ -8,7 +8,7 @@ antenas, que es lo que reporta el propio equipo.
 Creado a partir de
 [soundbase-plugin-template](https://github.com/soundbase-lab/soundbase-plugin-template).
 
-> **Estado: funciona con un AXT600 real (firmware 2.1.41), en pruebas.**
+> **Estado: funciona con un AXT600 real (firmware 2.1.41) en SoundBase Desktop, en pruebas.**
 > Habla el protocolo del AXT600 tal como se ve en capturas de Wireless
 > Workbench con una unidad de firmware 2.1.41: ACN estándar, sin cifrar
 > ([docs/protocolo.md](docs/protocolo.md)). Los paquetes que envía son, byte a
