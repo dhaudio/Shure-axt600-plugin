@@ -48,6 +48,7 @@ export async function startFakeAxt600({
   refuseJoin = false,
   skip = null, // [fromHz, toHz]: a band the unit never reports, as a real one did
   scanningAtStart = false, // as if another controller left it scanning
+  ignoreJoins = 0, // drop this many JOINs, as a unit that has not heard of us
 } = {}) {
   const cid = Buffer.concat([randomBytes(4), Buffer.from('000011dda000000eddcccccc', 'hex')]);
   const socket = dgram.createSocket('udp4');
@@ -136,6 +137,7 @@ export async function startFakeAxt600({
       const j = parseJoin(data);
       if (!j.memberCid.equals(cid)) return;
       state.joins += 1;
+      if (state.joins <= ignoreJoins) return;
       state.peer = { address: rinfo.address, port: rinfo.port, cid: sender };
       if (refuseJoin) {
         const refuse = Buffer.alloc(25);

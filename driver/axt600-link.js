@@ -25,7 +25,8 @@
 // 100 % — which is when the link reports it.
 
 import { SessionError, SdtSession } from './sdt-session.js';
-import { decodeString, u32, u8 } from './acn.js';
+import { cidToString, decodeString, u32, u8 } from './acn.js';
+import { buildAdvert } from './slp.js';
 
 export const P = {
   MODEL: 0x01000012,
@@ -91,6 +92,11 @@ export class Axt600NetworkLink {
       port: port ?? undefined,
       deviceCid: cid,
       log: this.log,
+      announce: this.slp
+        ? ({ cid: ours, host, port: localPort }) =>
+            host &&
+            this.slp.advertise(buildAdvert({ cidText: cidToString(ours), host, port: localPort }), host)
+        : null,
     });
     this.session.onFatal = (err) => this.onFatal?.(err);
     this.session.onDmp = (items) => this.handleDmp(items);

@@ -30,7 +30,14 @@ del software de Shure. Cualquier implementación de E1.17 puede hablar con él.
 ```
 
 El CID empieza por los cuatro últimos bytes de la MAC (MAC `00:0e:a1:b2:c3:d4` → CID `A1B2C3D4-…`), seguidos de
-un sufijo fijo. El plugin solo escucha: no se anuncia.
+un sufijo fijo.
+
+Wireless Workbench se anuncia igual, con su propio CID y `acn-fctn=WWB6`, dos
+segundos antes de su primer `JOIN`, y repite el anuncio cada ~4 s. Una unidad
+real no contestó al `JOIN` de un controlador que no se había anunciado, así
+que el plugin también lo hace. Se anuncia como `acn-fctn=SoundBase`, con su
+propio CID y su propio identificador de definición, nunca como Wireless
+Workbench.
 
 ## Sesión (SDT)
 
@@ -101,8 +108,11 @@ indica que los `SET` anteriores ya se han procesado. El plugin hace lo mismo.
 El script `npm run probe -- <IP>` responde a casi todo esto. Antes de
 ejecutarlo hay que cerrar Wireless Workbench.
 
-1. **Si el equipo acepta un controlador que no se anuncia por SLP.** Wireless
-   Workbench se anuncia dos segundos antes de conectarse; el plugin no.
+1. **Si basta con anunciarse como SoundBase.** Sin anunciarse, el equipo no
+   contestó al `JOIN`. Con Wireless Workbench abierto sí contestó, pero entonces
+   rechazó los ajustes del escaneo (DMP *reason 5*), porque WWB tenía el
+   escáner. El plugin ahora se anuncia; falta confirmar que el equipo no
+   exige que sea Wireless Workbench.
 2. **Pasos de 200 kHz y 1 MHz.** En la captura, Wireless Workbench escaneó a
    25 kHz todo el rango aunque se le pidió 470–616 a 200 kHz. Falta ver que el
    equipo acepta otro paso y cómo numera entonces los puntos: por pasos desde

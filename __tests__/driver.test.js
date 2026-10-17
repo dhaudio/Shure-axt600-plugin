@@ -15,7 +15,7 @@ import { SweepAssembler } from '../driver/sweep-assembler.js';
 import { SimulatedAxt600 } from '../driver/simulated-axt600.js';
 import { Axt600NetworkLink, createLink, isSimulated } from '../driver/link.js';
 import { SdtSession } from '../driver/sdt-session.js';
-import { SlpListener, parseAdvert } from '../driver/slp.js';
+import { SlpListener, buildAdvert, parseAdvert } from '../driver/slp.js';
 import { startFakeAxt600 } from '../driver/fake-axt600.js';
 import { createSpectrumAnalyzerAdapter } from '../adapter.js';
 
@@ -187,6 +187,40 @@ test('a session joins, reads, writes and leaves', async (t) => {
   await session.close();
   await delay(50);
   assert.equal(unit.state.left, true);
+});
+
+test('our advert has the layout of Wireless Workbench\'s, under our own identity', () => {
+  const ad = buildAdvert({ cidText: '0A0B0C0D-0000-11DD-A000-000EDDCCCCCC', host: '192.168.1.69', port: 55540 });
+  assert.equal(ad[0], 2); // SLPv2
+  assert.equal(ad[1], 7); // attribute reply, as Shure equipment multicasts it
+  assert.equal(ad.readUIntBE(2, 3), ad.length);
+  assert.equal(ad.readUInt16BE(18), ad.length - 21); // attribute list length
+  assert.equal(ad.at(-1), 0); // no auth blocks
+  const text = ad.toString('latin1');
+  assert.match(text, /\(acn-fctn=SoundBase\)/);
+  assert.doesNotMatch(text, /WWB/);
+  const parsed = parseAdvert(ad);
+  assert.equal(parsed.host, '192.168.1.69');
+  assert.equal(parsed.port, 55540);
+});
+
+test('the session announces itself before joining, and re-joins an unanswered JOIN', async (t) => {
+  const unit = await startFakeAxt600({ ignoreJoins: 1 });
+  t.after(() => unit.close());
+  const announced = [];
+  const session = new SdtSession({
+    host: unit.host,
+    port: unit.port,
+    deviceCid: unit.cid,
+    announce: async (a) => announced.push({ ...a, joinsSoFar: unit.state.joins }),
+  });
+  await session.open();
+  assert.equal(unit.state.joins, 2);
+  assert.equal(announced[0].joinsSoFar, 0, 'announced before the first JOIN');
+  assert.ok(announced.length >= 2, 're-announced after the unanswered JOIN');
+  assert.ok(announced[0].cid.equals(session.cid));
+  assert.equal(announced[0].host, '127.0.0.1');
+  await session.close();
 });
 
 test('a refused join says why', async (t) => {

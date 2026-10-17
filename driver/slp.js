@@ -6,15 +6,49 @@
 //   (cid=A1B2C3D4-0000-11DD-A000-000EDDCCCCCC),(acn-fctn=AXT600),
 //   (acn-uacn=AXT600),(csl-esta.dmp=esta.sdt/192.168.1.3:57383;…)
 //
-// This only listens. It sends nothing, so it never disturbs a show network.
+// The listener only listens. A controller also has to announce itself the
+// same way before it joins: Wireless Workbench multicasts its own advert two
+// seconds before its first JOIN, and a unit did not answer a controller that
+// had not. `buildAdvert` makes ours — as SoundBase, under this plugin's own
+// component id, never as Wireless Workbench.
 
 import dgram from 'node:dgram';
 import os from 'node:os';
 import { cidFromString } from './acn.js';
 
+/** This plugin's component definition id: ours, not Wireless Workbench's. */
+export const PLUGIN_DCID = '6F1B6C1E-4C7A-4E62-9D5B-A7F2C2B60600';
+
 export const SLP_GROUP = '239.255.254.253';
 export const SLP_PORT = 8427;
 const FORGET_AFTER_MS = 15_000;
+
+/**
+ * An SLPv2 attribute reply announcing a controller, in the layout Shure
+ * equipment sends: header, error 0, the attribute list, no auth blocks.
+ */
+export function buildAdvert({ cidText, host, port, xid = 0x223d }) {
+  const attrs = Buffer.from(
+    `(cid=${cidText}),(acn-fctn=SoundBase),(acn-uacn=SoundBase AXT600 plugin),` +
+      `(acn-services=esta.dmp),(csl-esta.dmp=esta.sdt/${host}:${port};esta.dmp/cd:${PLUGIN_DCID}),` +
+      `(csl-esta.dmp.values=version:1_interfaceId:1_extVersion:1)`,
+    'latin1'
+  );
+  const lang = Buffer.from('en');
+  const body = Buffer.alloc(4);
+  body.writeUInt16BE(0, 0); // error code
+  body.writeUInt16BE(attrs.length, 2);
+  const total = 14 + lang.length + body.length + attrs.length + 1;
+  const head = Buffer.alloc(14);
+  head[0] = 2; // SLPv2
+  head[1] = 7; // AttrRply
+  head.writeUIntBE(total, 2, 3);
+  head.writeUInt16BE(0, 5); // flags
+  head.writeUIntBE(0, 7, 3); // next extension
+  head.writeUInt16BE(xid, 10);
+  head.writeUInt16BE(lang.length, 12);
+  return Buffer.concat([head, lang, body, attrs, Buffer.from([0])]);
+}
 
 /** Attribute list text -> { cid, fctn, uacn, host, port } or null. */
 export function parseAdvert(buf) {
@@ -101,6 +135,24 @@ export class SlpListener {
       }, timeoutMs);
       this.#waiters.add(waiter);
     });
+  }
+
+  /** Multicast an advert from the SLP port, out of the interface at `from`. */
+  async advertise(packet, from) {
+    await this.start();
+    const target = this.multicast ? [SLP_GROUP, SLP_PORT] : ['127.0.0.1', this.port];
+    const socket = this.#socket;
+    if (!socket) return false;
+    try {
+      if (this.multicast && from) socket.setMulticastInterface(from);
+      await new Promise((resolve, reject) =>
+        socket.send(packet, target[1], target[0], (err) => (err ? reject(err) : resolve()))
+      );
+      return true;
+    } catch (err) {
+      this.log(`could not send the SLP advert: ${err.message}`);
+      return false;
+    }
   }
 
   close() {

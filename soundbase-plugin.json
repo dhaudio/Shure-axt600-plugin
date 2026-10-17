@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "shure-axt600",
   "name": "Shure AXT600",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "license": "BUSL-1.1",
   "platforms": [
     "darwin-arm64",

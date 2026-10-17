@@ -47,6 +47,10 @@ const KEEPALIVE_MS = 1_400;
 const ACK_DELAY_MS = 60;
 const SILENCE_LIMIT_MS = 6_000;
 const STEP_TIMEOUT_MS = 4_000;
+const JOIN_RETRY_MS = 2_000;
+const JOIN_ATTEMPTS = 3;
+const ANNOUNCE_LEAD_MS = 1_000;
+const ANNOUNCE_EVERY_TICKS = 3; // ~4 s, Wireless Workbench's cadence
 
 export class SessionError extends Error {
   constructor(message, code) {
@@ -71,7 +75,13 @@ export class SdtSession {
    * @param deviceCid  its component id, 16 bytes (from its SLP advert)
    * @param log        (line) => void, for milestones a person may need
    */
-  constructor({ host, port = DEFAULT_SDT_PORT, deviceCid, log = () => {}, randomBytes = nodeRandomBytes }) {
+  /**
+   * @param announce   async ({ cid, host, port }) => void — announce this
+   *                   controller (an SLP advert) before joining and every few
+   *                   seconds after; `host` and `port` are our local address
+   */
+  constructor({ host, port = DEFAULT_SDT_PORT, deviceCid, log = () => {}, randomBytes = nodeRandomBytes, announce = null }) {
+    this.announce = announce;
     this.host = host;
     this.port = port;
     this.deviceCid = deviceCid;
@@ -121,24 +131,50 @@ export class SdtSession {
       });
     });
 
-    // 1. our channel: JOIN, and the device's JOIN_ACCEPT
-    const accepted = this.#wait(
-      (e) => e.type === 'join-accept' || e.type === 'join-refuse',
-      'the AXT600 to accept the session'
+    // 0. announce ourselves, as Wireless Workbench does two seconds before it joins
+    this.local = await this.#localAddress();
+    await this.#announce();
+    if (this.announce) await new Promise((r) => setTimeout(r, ANNOUNCE_LEAD_MS));
+
+    // 1. our channel: JOIN, and the device's JOIN_ACCEPT — resent, re-announced,
+    // if the unit does not answer
+    const theirJoin = this.#wait(
+      (e) => e.type === 'join',
+      'the AXT600 to open its channel',
+      STEP_TIMEOUT_MS * (JOIN_ATTEMPTS + 1)
     );
-    const theirJoin = this.#wait((e) => e.type === 'join', 'the AXT600 to open its channel');
     // awaited later; if an earlier step fails, its rejection is not a second error
     theirJoin.catch(() => {});
-    this.#sendRoot(
-      join({
-        memberCid: this.deviceCid,
-        mid: DEVICE_MID,
-        channel: this.channel,
-        total: this.total,
-        reliable: this.reliable,
-      })
-    );
-    const answer = await accepted;
+    const joinPdu = join({
+      memberCid: this.deviceCid,
+      mid: DEVICE_MID,
+      channel: this.channel,
+      total: this.total,
+      reliable: this.reliable,
+    });
+    let answer = null;
+    for (let attempt = 1; attempt <= JOIN_ATTEMPTS && !answer; attempt += 1) {
+      const accepted = this.#wait(
+        (e) => e.type === 'join-accept' || e.type === 'join-refuse',
+        'the AXT600 to accept the session',
+        JOIN_RETRY_MS
+      );
+      this.#sendRoot(joinPdu);
+      try {
+        answer = await accepted;
+      } catch (err) {
+        if (err.code !== 'timeout') throw err;
+        this.log(`no answer to JOIN (attempt ${attempt} of ${JOIN_ATTEMPTS})`);
+        await this.#announce();
+      }
+    }
+    if (!answer) {
+      throw new SessionError(
+        `The AXT600 at ${this.host} did not answer. Check that nothing else is connected ` +
+          `to it (quit Wireless Workbench), and if it still does not answer, power-cycle it.`,
+        'timeout'
+      );
+    }
     if (answer.type === 'join-refuse') {
       throw new SessionError(
         `The AXT600 refused the session (reason ${answer.reason ?? 'unknown'}). ` +
@@ -335,6 +371,33 @@ export class SdtSession {
       return;
     }
     this.#sendWrapper(false, [], { mak: true });
+    this.ticks = (this.ticks ?? 0) + 1;
+    if (this.ticks % ANNOUNCE_EVERY_TICKS === 0) this.#announce();
+  }
+
+  async #announce() {
+    if (!this.announce || !this.local) return;
+    try {
+      await this.announce({ cid: this.cid, ...this.local });
+    } catch (err) {
+      this.log(`announcing: ${err.message}`);
+    }
+  }
+
+  /** The local address and port the unit will see us at. */
+  async #localAddress() {
+    const port = this.#socket.address().port;
+    const probe = dgram.createSocket('udp4');
+    try {
+      await new Promise((resolve, reject) =>
+        probe.connect(this.port, this.host, (err) => (err ? reject(err) : resolve()))
+      );
+      return { host: probe.address().address, port };
+    } catch {
+      return { host: null, port };
+    } finally {
+      probe.close();
+    }
   }
 
   #receive(msg) {
