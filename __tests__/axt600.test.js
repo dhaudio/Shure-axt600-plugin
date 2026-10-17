@@ -174,7 +174,9 @@ test('out-of-range configuration is clamped, not rejected', async () => {
 });
 
 test('a sweep arrives on the configured axis, with the venue in it', async (t) => {
-  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 200_000 });
+  // complete passes only, so the first trace has the whole range in it
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 200_000, controls: { progressive: false } });
+  t.after(() => configure({ controls: { progressive: true } }));
   await sweeping(t);
 
   const { status, body } = await traceAfter();
@@ -234,6 +236,33 @@ test('retuning while sweeping moves the trace to the new range', async (t) => {
   assert.equal(after.body.stopHz, 700_000_000);
   assert.equal(after.body.pointCount, 101);
   assert.equal(unit.scan.startKhz, 600_000);
+});
+
+test('the progressive control is declared and echoed', async () => {
+  const caps = (await listed()).capabilities;
+  const control = caps.controls.find((c) => c.id === 'progressive');
+  assert.equal(control.type, 'checkbox');
+  assert.equal(control.default, true);
+  const off = await configure({ controls: { progressive: false } });
+  assert.equal(off.body.controls.progressive, false);
+  const on = await configure({ controls: { progressive: true } });
+  assert.equal(on.body.controls.progressive, true);
+});
+
+test('a request that changes nothing the unit sweeps leaves it scanning', async (t) => {
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 1_000_000 });
+  await sweeping(t);
+  await until(() => unit.scanning, { what: 'the unit to scan' });
+  const writes = unit.state.sets.length;
+  await configure({ traceMode: 'max-hold' });
+  await configure({ controls: { progressive: false } });
+  await delay(100);
+  assert.equal(unit.scanning, true, 'still scanning');
+  assert.equal(unit.state.sets.length, writes, 'nothing written to the unit');
+  const before = await traceAfter();
+  const after = await traceAfter(before.body.sweepId);
+  assert.ok(after.body.sweepId > before.body.sweepId, 'traces keep coming');
+  await configure({ traceMode: 'clear-write', controls: { progressive: true } });
 });
 
 test('stopping the sweep stops the unit scanning', async () => {

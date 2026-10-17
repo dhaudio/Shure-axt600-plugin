@@ -138,6 +138,79 @@ test('a tile off the plan axis, or a garbage reading, is never drawn', () => {
   assert.equal(sweeps[0][0], -90);
 });
 
+test('progressive mode draws each piece as it arrives, over the previous pass', async () => {
+  const sweeps = [];
+  const asm = new SweepAssembler(smallPlan(), (a, info) => sweeps.push({ a, info }), {
+    progressive: true,
+    intervalMs: 20,
+  });
+  asm.add(tile(0, Array(6).fill(-90)));
+  asm.passEnd(); // a complete first pass
+  assert.equal(sweeps.length, 1);
+  assert.equal(sweeps[0].info.complete, true);
+
+  asm.add(tile(0, [-40])); // a carrier appears at the start of the next pass
+  await delay(40);
+  assert.equal(sweeps.length, 2, 'drawn before the pass ends');
+  assert.equal(sweeps[1].info.complete, false);
+  assert.deepEqual(sweeps[1].a, [-40, -90, -90, -90, -90, -90]);
+
+  asm.add(tile(1, [-91]));
+  asm.add(tile(2, [-92])); // two pieces inside one interval: one emit
+  await delay(40);
+  assert.equal(sweeps.length, 3);
+  asm.dispose();
+});
+
+test('a pass end replaces a pending progressive emit', async () => {
+  const sweeps = [];
+  const asm = new SweepAssembler(smallPlan(), (a, info) => sweeps.push(info), {
+    progressive: true,
+    intervalMs: 50,
+  });
+  asm.add(tile(0, Array(6).fill(-90)));
+  asm.passEnd();
+  await delay(80);
+  assert.deepEqual(sweeps.map((i) => i.complete), [true]);
+});
+
+test('with progressive on, the adapter traces before the first pass completes', async () => {
+  process.env.SB_AXT600_SIM_TIMESCALE = '0.05'; // a 9.4 s pass in ~470 ms
+  const adapter = createSpectrumAnalyzerAdapter({ id: 'sim:axt600' });
+  await adapter.open();
+  const applied = await adapter.applyConfig({ startHz: 470e6, stopHz: 616e6, rbwHz: 200e3 });
+  assert.equal(applied.controls.progressive, true);
+  const at = [];
+  const started = Date.now();
+  await adapter.startSweep(() => at.push(Date.now() - started));
+  while (at.length < 3) await delay(10);
+  await adapter.stopSweep();
+  await adapter.close();
+  process.env.SB_AXT600_SIM_TIMESCALE = '0.002';
+  assert.ok(at[0] < 400, `first trace after ${at[0]} ms, before the ~470 ms pass`);
+});
+
+test('turning progressive off traces only complete passes', async () => {
+  process.env.SB_AXT600_SIM_TIMESCALE = '0.05';
+  const adapter = createSpectrumAnalyzerAdapter({ id: 'sim:axt600' });
+  await adapter.open();
+  const applied = await adapter.applyConfig({
+    startHz: 470e6,
+    stopHz: 616e6,
+    rbwHz: 200e3,
+    controls: { progressive: false },
+  });
+  assert.equal(applied.controls.progressive, false);
+  const at = [];
+  const started = Date.now();
+  await adapter.startSweep(() => at.push(Date.now() - started));
+  while (at.length < 1) await delay(10);
+  await adapter.stopSweep();
+  await adapter.close();
+  process.env.SB_AXT600_SIM_TIMESCALE = '0.002';
+  assert.ok(at[0] >= 400, `first trace after ${at[0]} ms: a whole pass`);
+});
+
 // ---------------------------------------------------------------------------
 // SLP
 // ---------------------------------------------------------------------------
@@ -432,7 +505,9 @@ test('a slow scan shows a filling notice until its first sweep', async () => {
   await adapter.startSweep(() => (traces += 1));
   assert.equal(warnings.at(-1)[0].id, 'scan-filling');
   assert.match(warnings.at(-1)[0].message, /64 s/);
-  while (traces < 1) await delay(10);
+  // progressive traces keep the notice; the first complete pass clears it
+  while (warnings.at(-1).length) await delay(10);
+  assert.ok(traces >= 1);
   assert.deepEqual(warnings.at(-1), []);
   await adapter.stopSweep();
   await adapter.close();
