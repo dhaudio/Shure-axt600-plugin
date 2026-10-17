@@ -6,18 +6,22 @@ worth reading yourself.
 
 ## This plugin: Shure AXT600
 
-A spectrum-analyzer plugin for the Shure AXT600 Axient Spectrum Manager.
-The AXT600's network protocol is **not known yet**: `Axt600NetworkLink` in
-`driver/link.js` throws `ProtocolPendingError` until it is written from packet
-captures of Wireless Workbench talking to a real unit (`docs/protocolo.md`).
-Do not guess at the wire format; implement it only from captures.
+A spectrum-analyzer plugin for the Shure AXT600 Axient Spectrum Manager. The
+unit speaks plain ACN (E1.17): SLP adverts, an SDT session on UDP 57383, DMP
+properties, no encryption. `docs/protocolo.md` is the property map, decoded
+from captures of Wireless Workbench and a unit on firmware 2.1.41.
 
-- `driver/link.js` is the only seam with the hardware. The link interface is
-  documented at the top of that file; `driver/simulated-axt600.js` implements it.
-- `driver/scan-plan.js` holds the datasheet figures (470–952 MHz, steps
-  25/200/1000 kHz, scan times). Move them when a real unit disagrees.
-- `driver/sweep-assembler.js` turns out-of-order tiles from two antennas into
-  complete sweeps; the adapter emits the max of A and B plus both as series.
+- `driver/acn.js` encodes and decodes; `__tests__/acn.test.js` rebuilds the
+  captured Wireless Workbench packets byte for byte. Keep that passing.
+- `driver/sdt-session.js` is the session (join, keepalive, ACK, get/set/sub).
+- `driver/axt600-link.js` maps scan settings and scan data to the link
+  interface documented in `driver/link.js`.
+- `driver/fake-axt600.js` is the device side over UDP, for tests; the in-process
+  `driver/simulated-axt600.js` backs the "Simulated AXT600" device.
+- Each scan point arrives twice per pass (one antenna, then the max of both);
+  a pass ends at progress 100 %. There are no per-antenna curves.
+- `npm run probe -- <ip>` runs the driver against a real unit and writes a
+  report. Unconfirmed on hardware: see the end of `docs/protocolo.md`.
 - The shell merges configuration patches and passes the full desired state to
   `applyConfig`; `rbwHz: null` returns RBW to auto.
 

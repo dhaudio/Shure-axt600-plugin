@@ -1,31 +1,31 @@
 // Scan pieces -> complete sweeps.
 //
-// The AXT600 scans with eight modules in parallel, so a pass over the range
-// does not arrive in frequency order: each module reports its own block when it
-// finishes it. The link hands over those pieces as "tiles":
+// The AXT600 scans with eight modules in parallel, so a pass does not arrive
+// in frequency order: each module reports its block as it goes, and each point
+// arrives twice — once for the first antenna, then again as the stronger of
+// the two. The link hands over pieces as tiles:
 //
-//   { antenna: 0 | 1, startHz, stepHz, amplitudesDbm: number[] }
+//   { startHz, stepHz, amplitudesDbm: number[] }
 //
-// and this turns them into what SoundBase wants: one array per antenna on the
-// plan's frequency axis, emitted when every point of every antenna has been
-// refreshed since the last emit. Values persist between passes, so a tile that
-// arrives late never blanks part of the trace.
+// and says when the pass is over. This keeps the latest value of every point
+// and, at the end of each pass, emits one array on the plan's frequency axis.
+//
+// A point the unit never reported in a pass is filled with the lowest level
+// seen in that pass, so the trace stays drawable without inventing a signal,
+// and the gaps are reported so the user can be told.
 
-import { ANTENNAS, decimate } from './scan-plan.js';
+import { decimate } from './scan-plan.js';
 
 export class SweepAssembler {
   /**
    * @param plan    from planScan()
-   * @param onSweep (combinedDbm, [{ name, amplitudesDbm }]) on every complete pass
+   * @param onSweep (amplitudesDbm, { missing: [[fromHz, toHz], …] }) per pass
    */
   constructor(plan, onSweep) {
     this.plan = plan;
     this.onSweep = onSweep;
-    this.values = ANTENNAS.map(() =>
-      new Array(plan.deviceCount).fill(Number.NaN)
-    );
-    this.fresh = ANTENNAS.map(() => new Uint8Array(plan.deviceCount));
-    this.missing = ANTENNAS.length * plan.deviceCount;
+    this.values = new Array(plan.deviceCount).fill(Number.NaN);
+    this.fresh = new Uint8Array(plan.deviceCount);
     this.passes = 0;
     /** tiles that did not land on this plan's axis, for diagnostics */
     this.misaligned = 0;
@@ -33,13 +33,13 @@ export class SweepAssembler {
 
   /** How much of the current pass has arrived, 0..1. */
   get progress() {
-    const total = ANTENNAS.length * this.plan.deviceCount;
-    return (total - this.missing) / total;
+    let n = 0;
+    for (const f of this.fresh) n += f;
+    return n / this.plan.deviceCount;
   }
 
-  add(tile) {
-    const { antenna, startHz, stepHz, amplitudesDbm } = tile;
-    if (!this.values[antenna] || !Array.isArray(amplitudesDbm)) return;
+  add({ startHz, stepHz, amplitudesDbm }) {
+    if (!Array.isArray(amplitudesDbm)) return;
     if (stepHz !== this.plan.stepHz) {
       this.misaligned += 1;
       return;
@@ -49,35 +49,37 @@ export class SweepAssembler {
       this.misaligned += 1;
       return;
     }
-
-    const values = this.values[antenna];
-    const fresh = this.fresh[antenna];
     for (let i = 0; i < amplitudesDbm.length; i += 1) {
       const index = offset + i;
-      if (index < 0 || index >= values.length) continue;
       const v = amplitudesDbm[i];
-      if (!Number.isFinite(v)) continue;
-      values[index] = v;
-      if (!fresh[index]) {
-        fresh[index] = 1;
-        this.missing -= 1;
-      }
+      if (index < 0 || index >= this.values.length || !Number.isFinite(v)) continue;
+      // implausible readings are dropped rather than drawn
+      if (v < -200 || v > 50) continue;
+      this.values[index] = v;
+      this.fresh[index] = 1;
     }
-
-    if (this.missing === 0) this.#emit();
   }
 
-  #emit() {
+  /** The pass is over: emit it, if anything at all arrived. */
+  passEnd() {
+    let floor = Infinity;
+    for (let i = 0; i < this.values.length; i += 1) {
+      if (this.fresh[i] && this.values[i] < floor) floor = this.values[i];
+    }
+    if (!Number.isFinite(floor)) return;
+
+    const missing = [];
+    const filled = this.values.map((v, i) => {
+      if (this.fresh[i]) return v;
+      const hz = this.plan.startHz + i * this.plan.stepHz;
+      const last = missing[missing.length - 1];
+      if (last && last[1] === hz - this.plan.stepHz) last[1] = hz;
+      else missing.push([hz, hz]);
+      return floor;
+    });
+
     this.passes += 1;
-    const curves = ANTENNAS.map((name, a) => ({
-      name,
-      amplitudesDbm: decimate(this.values[a], this.plan),
-    }));
-    const combined = curves[0].amplitudesDbm.map((_, i) =>
-      Math.max(...curves.map((c) => c.amplitudesDbm[i]))
-    );
-    for (const f of this.fresh) f.fill(0);
-    this.missing = ANTENNAS.length * this.plan.deviceCount;
-    this.onSweep(combined, curves);
+    this.fresh.fill(0);
+    this.onSweep(decimate(filled, this.plan), { missing });
   }
 }

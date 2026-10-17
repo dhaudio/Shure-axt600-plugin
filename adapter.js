@@ -1,14 +1,13 @@
 // Shure AXT600 Axient Spectrum Manager, as a SoundBase spectrum analyzer.
 //
-// The AXT600's scan becomes the live trace: the strongest level either antenna
-// saw at each frequency, with antennas A and B also drawn as their own curves.
+// The AXT600's scan becomes the live trace: at each frequency, the stronger of
+// what its two antennas measured — which is what the unit itself reports.
 //
-// Everything about the wire lives behind a link (driver/link.js). Today there
-// are two: a simulator, and the real network link, which stays empty until the
-// unit's protocol has been captured (docs/protocolo.md). This file does not
-// change when that happens.
+// Everything about the wire lives behind a link (driver/link.js): the real
+// one speaks ACN to the unit (driver/axt600-link.js); a simulator stands in
+// for it when there is no unit.
 
-import { createLink, SIMULATED_HOST } from './driver/link.js';
+import { createLink, SIMULATED_HOST, slpListener } from './driver/link.js';
 import {
   MAX_FREQUENCY_HZ,
   MIN_FREQUENCY_HZ,
@@ -25,6 +24,10 @@ export const SIMULATED_DEVICE_ID = 'sim:axt600';
 /** A scan this slow gets an "it is filling in" notice until the first pass. */
 const FILLING_NOTICE_MS = 5_000;
 
+const MHZ = (hz) => (hz / 1e6).toFixed(3);
+const logLine = (level, message) =>
+  process.stdout.write(`[${new Date().toISOString()}] [${level}] ${message}\n`);
+
 const envFlag = (name) => /^(1|true|yes)$/i.test(process.env[name] ?? '');
 const simTimeScale = () => {
   const v = Number(process.env.SB_AXT600_SIM_TIMESCALE);
@@ -32,23 +35,28 @@ const simTimeScale = () => {
 };
 
 /**
- * Devices reachable right now.
- *
- * A real AXT600 is added by hand, by its IP address: how it announces itself
- * on the network is one of the things the protocol capture has to establish,
- * and until then this plugin does not listen for it. The simulated unit is
- * listed when the plugin setting (or SB_AXT600_MOCK=1) asks for it.
+ * Devices reachable right now: every AXT600 whose SLP advert has been heard on
+ * this computer's networks, plus the simulated unit when the plugin setting
+ * (or SB_AXT600_MOCK=1) asks for it. Listening sends nothing.
  */
 export async function discoverDevices(pluginConfig = {}) {
-  if (pluginConfig.simulate !== true && !envFlag('SB_AXT600_MOCK')) return [];
-  return [
-    {
+  const slp = slpListener((m) => logLine('warn', m));
+  await slp.start();
+  const found = slp.devices().map((advert) => ({
+    id: `net:${advert.host}`,
+    name: `${advert.uacn} (${advert.host})`,
+    product: PRODUCT,
+    transport: { kind: 'network', host: advert.host, port: advert.port },
+  }));
+  if (pluginConfig.simulate === true || envFlag('SB_AXT600_MOCK')) {
+    found.push({
       id: SIMULATED_DEVICE_ID,
       name: 'Simulated AXT600',
       product: PRODUCT,
       transport: { kind: 'network', host: SIMULATED_HOST },
-    },
-  ];
+    });
+  }
+  return found;
 }
 
 export function createSpectrumAnalyzerAdapter(device) {
@@ -74,6 +82,7 @@ class Axt600Adapter {
     this.link = createLink(this.device, {
       host: this.host,
       timeScale: simTimeScale(),
+      log: (m) => logLine('info', `[${this.device.id}] ${m}`),
     });
     this.link.onFatal = (err) => {
       this.sweeping = false;
@@ -163,10 +172,10 @@ class Axt600Adapter {
   }
 
   async #beginScan() {
-    const assembler = new SweepAssembler(this.plan, (combined, curves) => {
+    const assembler = new SweepAssembler(this.plan, (amplitudes, { missing }) => {
       if (!this.sweeping || this.assembler !== assembler) return;
-      if (this.warnings.length) this.#setWarnings([]);
-      this.onTrace?.(combined, curves);
+      this.#setWarnings(missing.length ? [gapWarning(missing)] : []);
+      this.onTrace?.(amplitudes);
     });
     this.assembler = assembler;
 
@@ -178,13 +187,16 @@ class Axt600Adapter {
           severity: 'info',
           message:
             `The AXT600 is scanning; at this range and resolution a full pass ` +
-            `takes up to ${seconds} s, and the trace appears when both antennas ` +
-            `have covered the whole range. A coarser RBW or a narrower range is faster.`,
+            `takes up to ${seconds} s, and the trace appears when the pass is ` +
+            `complete. A coarser RBW or a narrower range is faster.`,
         },
       ]);
     }
 
-    await this.link.startScan((tile) => assembler.add(tile));
+    await this.link.startScan(
+      (tile) => assembler.add(tile),
+      () => assembler.passEnd()
+    );
   }
 
   async #restartScan() {
@@ -193,9 +205,26 @@ class Axt600Adapter {
   }
 
   #setWarnings(warnings) {
+    const same =
+      warnings.length === this.warnings.length &&
+      warnings.every((w, i) => w.id === this.warnings[i].id && w.message === this.warnings[i].message);
+    if (same) return;
     this.warnings = warnings;
     this.onWarnings?.(warnings);
   }
+}
+
+/** Points the unit did not report in its last pass, named for the user. */
+function gapWarning(missing) {
+  const ranges = missing.map(([a, b]) => (a === b ? `${MHZ(a)} MHz` : `${MHZ(a)}–${MHZ(b)} MHz`));
+  const shown = ranges.slice(0, 3).join(', ') + (ranges.length > 3 ? ` and ${ranges.length - 3} more` : '');
+  return {
+    id: 'scan-gaps',
+    severity: 'info',
+    message:
+      `The AXT600 did not report ${shown} in its last pass; the trace shows ` +
+      `the noise floor there. Do not coordinate into those frequencies on this trace alone.`,
+  };
 }
 
 /**

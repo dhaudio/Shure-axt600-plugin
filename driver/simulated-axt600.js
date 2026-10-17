@@ -1,13 +1,13 @@
 // A pretend AXT600 that speaks the link interface (see driver/link.js).
 //
-// It exists for two reasons: the tests run everywhere with nothing plugged in,
-// and the plugin can be loaded into SoundBase and looked at before the real
-// protocol is known. It behaves the way the datasheet says the hardware does:
-// two antennas, eight scanning modules finishing their blocks in no particular
-// order, and a pass that takes as long as the real one would (scaled by
-// `timeScale`, so tests need not wait a minute a sweep).
+// It lets the plugin be tried in SoundBase without a unit, and gives the
+// adapter tests something fast to talk to. It reports a pass the way a real
+// AXT600 does: eight scanning modules working through their blocks in
+// parallel, each point reported first for antenna A and then again as the
+// stronger of A and B, and a pass that takes as long as the real one would
+// (scaled by `timeScale`, so tests need not wait a minute a sweep).
 
-import { estimateScanMs, ANTENNAS } from './scan-plan.js';
+import { estimateScanMs } from './scan-plan.js';
 
 const MODULES = 8;
 
@@ -70,14 +70,14 @@ export class SimulatedAxt600 {
     return { ...this.#scan };
   }
 
-  async startScan(onTile) {
+  async startScan(onTile, onPassEnd) {
     this.#assertConnected();
     if (!this.#scan) throw new Error('startScan before configureScan');
     this.#running = true;
-    this.#pass(onTile);
+    this.#pass(onTile, onPassEnd);
   }
 
-  #pass(onTile) {
+  #pass(onTile, onPassEnd) {
     if (!this.#running) return;
     const { startHz, stepHz, deviceCount } = this.#scan;
     const passMs = Math.max(
@@ -85,30 +85,37 @@ export class SimulatedAxt600 {
       estimateScanMs((deviceCount - 1) * stepHz, stepHz) * this.timeScale
     );
     const perModule = Math.ceil(deviceCount / MODULES);
+    const levelA = new Array(deviceCount);
 
-    for (let m = 0; m < MODULES; m += 1) {
-      const from = m * perModule;
-      const count = Math.min(perModule, deviceCount - from);
-      if (count <= 0) continue;
-      // each module finishes somewhere in the second half of the pass
-      const at = passMs * (0.5 + Math.random() * 0.5);
-      this.#after(at, () => {
-        if (!this.#running) return;
-        const tileStart = startHz + from * stepHz;
-        ANTENNAS.forEach((_, antenna) => {
+    for (let half = 0; half < 2; half += 1) {
+      for (let m = 0; m < MODULES; m += 1) {
+        const from = m * perModule;
+        const count = Math.min(perModule, deviceCount - from);
+        if (count <= 0) continue;
+        // each module finishes its block somewhere within its half of the pass
+        const at = (passMs / 2) * (half + 0.3 + Math.random() * 0.65);
+        this.#after(at, () => {
+          if (!this.#running) return;
+          const tileStart = startHz + from * stepHz;
           const amplitudesDbm = new Array(count);
           for (let i = 0; i < count; i += 1) {
-            amplitudesDbm[i] = simulatedLevel(
-              tileStart + i * stepHz,
-              antenna,
-              stepHz
-            );
+            const hz = tileStart + i * stepHz;
+            if (half === 0) {
+              levelA[from + i] = simulatedLevel(hz, 0, stepHz);
+              amplitudesDbm[i] = levelA[from + i];
+            } else {
+              amplitudesDbm[i] = Math.max(levelA[from + i], simulatedLevel(hz, 1, stepHz));
+            }
           }
-          onTile({ antenna, startHz: tileStart, stepHz, amplitudesDbm });
+          onTile({ startHz: tileStart, stepHz, amplitudesDbm });
         });
-      });
+      }
     }
-    this.#after(passMs + 1, () => this.#pass(onTile));
+    this.#after(passMs, () => {
+      if (!this.#running) return;
+      onPassEnd?.();
+      this.#pass(onTile, onPassEnd);
+    });
   }
 
   async stopScan() {

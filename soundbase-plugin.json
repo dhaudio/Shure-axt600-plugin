@@ -63,7 +63,7 @@
       "type": "checkbox",
       "label": "Simulated AXT600",
       "default": false,
-      "help": "Adds a pretend AXT600 to the device picker, with two antennas and a realistic scan speed, so the plugin can be tried without the hardware."
+      "help": "Adds a pretend AXT600 to the device picker, scanning at the speed a real one does, so the plugin can be tried without the hardware. Real AXT600s on the network are found by themselves."
     }
   ],
   "stateKeys": [],
@@ -73,7 +73,13 @@
       "type": "textinput",
       "label": "IP address",
       "required": true,
-      "help": "The AXT600's address, shown on its front panel under Network."
+      "help": "The AXT600's address, shown on its front panel under Network. It has to be on the same network (subnet) as this computer."
+    },
+    {
+      "id": "cid",
+      "type": "textinput",
+      "label": "Component ID",
+      "help": "Normally left empty: the AXT600 announces its own. Fill it in only if this unit is never found by itself, with the 32 hexadecimal digits of its ACN component ID."
     }
   ]
 }

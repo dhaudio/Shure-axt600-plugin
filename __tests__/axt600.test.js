@@ -1,34 +1,54 @@
 // Contract tests for the adapter, driven through the real shell over real HTTP.
 //
-// Nothing here needs an AXT600: the simulated unit (driver/simulated-axt600.js)
-// stands in for it, sped up so a pass that takes seconds on the hardware takes
-// milliseconds here. Everything between the HTTP request and the link is the
-// real thing: shell, adapter, scan plan, sweep assembly.
+// Nothing here needs an AXT600. A fake one (driver/fake-axt600.js) advertises
+// on a loopback port and speaks the device side of the same ACN a real unit
+// does, so everything between the HTTP request and the UDP socket is the real
+// thing: shell, adapter, SLP discovery, SDT session, DMP, sweep assembly. The
+// fake scans fast, so a pass that takes seconds on the hardware takes
+// milliseconds here.
 //
 // Nothing here hardcodes the plugin's id: everything that could change when you
 // run `npm run rename` is read from soundbase-plugin.json.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import dgram from 'node:dgram';
 import { readFileSync } from 'node:fs';
 import { HANDSHAKE_PREFIX } from '@soundbase/plugin-contract';
+import { startFakeAxt600 } from '../driver/fake-axt600.js';
 
-// before the plugin loads: list the simulated unit, and run it fast
+// before the plugin loads: where it listens for adverts, and a fast simulator
+const freePort = async () => {
+  const s = dgram.createSocket('udp4');
+  await new Promise((r) => s.bind(0, '127.0.0.1', r));
+  const { port } = s.address();
+  await new Promise((r) => s.close(r));
+  return port;
+};
+const slpPort = await freePort();
+process.env.SB_AXT600_SLP_PORT = String(slpPort);
 process.env.SB_AXT600_MOCK = '1';
 process.env.SB_AXT600_SIM_TIMESCALE = '0.002';
+
+const unit = await startFakeAxt600({ slpPort, name: 'FOH AXT600', skip: [600e6, 605e6] });
 
 const { PRODUCT, SIMULATED_DEVICE_ID } = await import('../adapter.js');
 const manifest = JSON.parse(
   readFileSync(new URL('../soundbase-plugin.json', import.meta.url), 'utf8')
 );
 
-const DEVICE_PATH = `/devices/${encodeURIComponent(SIMULATED_DEVICE_ID)}`;
+const DEVICE_ID = `net:${unit.host}`;
+const DEVICE_PATH = `/devices/${encodeURIComponent(DEVICE_ID)}`;
+const SIM_PATH = `/devices/${encodeURIComponent(SIMULATED_DEVICE_ID)}`;
 const START_HZ = 470_000_000;
 const STOP_HZ = 616_000_000;
 
 // boots under the real shell, exactly as the host spawns it
 const handle = await (await import('../main.js')).default;
-test.after(() => handle.close());
+test.after(async () => {
+  await handle.close();
+  await unit.close();
+});
 
 const request = async (method, path, body) => {
   const res = await fetch(`${handle.url}${path}`, {
@@ -39,8 +59,6 @@ const request = async (method, path, body) => {
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 };
-const configure = (body) =>
-  request('POST', `${DEVICE_PATH}/configuration`, body);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const until = async (probe, { timeoutMs = 5_000, what = 'the condition' } = {}) => {
   const deadline = Date.now() + timeoutMs;
@@ -51,20 +69,20 @@ const until = async (probe, { timeoutMs = 5_000, what = 'the condition' } = {}) 
     await delay(25);
   }
 };
-const listed = async (id = SIMULATED_DEVICE_ID) => {
+const listed = async (id = DEVICE_ID) => {
   const { body } = await request('GET', '/devices');
   return body.devices.find((d) => d.id === id);
 };
-const sweeping = async (t) => {
-  const started = await request('POST', `${DEVICE_PATH}/sweep/start`);
+const configure = (body, path = DEVICE_PATH) =>
+  request('POST', `${path}/configuration`, body);
+const sweeping = async (t, path = DEVICE_PATH) => {
+  const started = await request('POST', `${path}/sweep/start`);
   assert.equal(started.status, 200);
-  t.after(() => request('POST', `${DEVICE_PATH}/sweep/stop`));
+  t.after(() => request('POST', `${path}/sweep/stop`));
 };
-const traceAfter = async (sweepId = 0) => {
-  let trace = await request('GET', `${DEVICE_PATH}/trace`);
-  while (trace.body.sweepId <= sweepId) {
-    trace = await request('GET', `${DEVICE_PATH}/trace`);
-  }
+const traceAfter = async (sweepId = 0, path = DEVICE_PATH) => {
+  let trace = await request('GET', `${path}/trace`);
+  while (trace.body.sweepId <= sweepId) trace = await request('GET', `${path}/trace`);
   return trace;
 };
 
@@ -76,18 +94,15 @@ test('the manifest is valid and the handshake reports a real port', () => {
 
 test('the product the adapter announces is declared in the manifest', () => {
   const declared = manifest.products.map((p) => p.deviceTypeId);
-  assert.ok(
-    declared.includes(PRODUCT),
-    `adapter.js announces ${PRODUCT}, but the manifest declares ${declared}`
-  );
+  assert.ok(declared.includes(PRODUCT), `${PRODUCT} not in ${declared}`);
   assert.ok(PRODUCT.startsWith(`plugin:${manifest.id}/`));
 });
 
-test('the simulated AXT600 is discovered', async () => {
-  const device = await listed();
-  assert.ok(device, 'the simulated unit is listed');
+test('an AXT600 on the network is discovered from its advert', async () => {
+  const device = await until(() => listed(), { what: 'the advertised unit' });
   assert.equal(device.product, PRODUCT);
   assert.equal(device.discovered, true);
+  assert.equal(device.name, `FOH AXT600 (${unit.host})`);
 });
 
 test('open() reports the AXT600 range and its three steps as RBW', async () => {
@@ -104,7 +119,7 @@ test('open() reports the AXT600 range and its three steps as RBW', async () => {
   ]);
 });
 
-test('a chosen RBW is a scan step: one point per step, and a sweep time', async () => {
+test('a chosen RBW is a scan step, written to the unit in kHz', async () => {
   const { status, body } = await configure({
     startHz: START_HZ,
     stopHz: STOP_HZ,
@@ -115,8 +130,8 @@ test('a chosen RBW is a scan step: one point per step, and a sweep time', async 
   assert.equal(body.stopHz, STOP_HZ);
   assert.equal(body.pointCount, 731); // 146 MHz / 200 kHz + 1
   assert.equal(body.rbwHz, 200_000);
-  // three 60 MHz blocks at 7 s, capped at the full-range time
   assert.equal(body.resolved.sweepTimeMs, 9_400);
+  assert.deepEqual(unit.scan, { startKhz: 470_000, stopKhz: 616_000, stepKhz: 200 });
 });
 
 test('an RBW between steps snaps to the nearest one', async () => {
@@ -131,9 +146,9 @@ test('without an RBW, the point count picks the finest step that fits', async ()
     rbwHz: null, // back to auto: the shell keeps a chosen RBW until cleared
     pointCount: 451,
   });
-  // 25 kHz needs 5841 points and 200 kHz 731; 1 MHz fits in 147
   assert.equal(body.pointCount, 147);
   assert.equal(body.resolved.rbwHz, 1_000_000);
+  assert.equal(unit.scan.stepKhz, 1000);
 });
 
 test('a 25 kHz scan of the whole range is coarsened, not truncated', async () => {
@@ -143,8 +158,7 @@ test('a 25 kHz scan of the whole range is coarsened, not truncated', async () =>
     rbwHz: 25_000,
   });
   assert.equal(body.rbwHz, 25_000);
-  assert.ok(body.pointCount <= 2_000, `${body.pointCount} points`);
-  assert.equal(body.pointCount, 1_929); // 19 281 device points, peak of each 10
+  assert.equal(body.pointCount, 1_929); // 19 281 points, peak of each 10
   assert.equal(body.resolved.sweepTimeMs, 64_000);
 });
 
@@ -159,7 +173,7 @@ test('out-of-range configuration is clamped, not rejected', async () => {
   assert.ok(body.stopHz <= 952_000_000);
 });
 
-test('a sweep is the peak of both antennas, with A and B as their own curves', async (t) => {
+test('a sweep arrives on the configured axis, with the venue in it', async (t) => {
   await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 200_000 });
   await sweeping(t);
 
@@ -170,23 +184,30 @@ test('a sweep is the peak of both antennas, with A and B as their own curves', a
   assert.equal(body.pointCount, 731);
   assert.equal(body.amplitudesDbm.length, 731);
   assert.equal(body.unit, 'dBm');
+  assert.equal(body.series, undefined);
 
-  assert.deepEqual(
-    body.series.map((s) => s.name),
-    ['A', 'B']
-  );
-  for (const s of body.series) assert.equal(s.amplitudesDbm.length, 731);
-  for (let i = 0; i < 731; i += 1) {
-    const [a, b] = body.series.map((s) => s.amplitudesDbm[i]);
-    assert.equal(body.amplitudesDbm[i], Math.max(a, b));
-  }
-
-  // the simulated venue: a carrier at 518.100 MHz over a -101 dBm floor
+  // the fake venue: a carrier at 518.100 MHz over a -101 dBm floor
   const at = (hz) => Math.round((hz - START_HZ) / 200_000);
   const carrier = Math.max(...body.amplitudesDbm.slice(at(518e6) - 2, at(518.2e6) + 2));
   const floor = Math.max(...body.amplitudesDbm.slice(at(480e6), at(500e6)));
   assert.ok(carrier > -50, `carrier only reached ${carrier}`);
   assert.ok(floor < -90, `floor rose to ${floor}`);
+});
+
+test('a band the unit never reports is filled and named in a warning', async (t) => {
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 200_000 });
+  await sweeping(t);
+  await traceAfter();
+  const device = await until(
+    async () => {
+      const d = await listed();
+      return d.status.warnings?.some((w) => w.id === 'scan-gaps') ? d : null;
+    },
+    { what: 'the gap warning' }
+  );
+  const warning = device.status.warnings.find((w) => w.id === 'scan-gaps');
+  assert.equal(warning.severity, 'info');
+  assert.match(warning.message, /600\.\d{3}–60[45]\.\d{3} MHz/);
 });
 
 test('successive polls see successive sweeps', async (t) => {
@@ -200,8 +221,7 @@ test('successive polls see successive sweeps', async (t) => {
 test('retuning while sweeping moves the trace to the new range', async (t) => {
   await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 1_000_000 });
   await sweeping(t);
-  const before = await traceAfter();
-  assert.equal(before.body.startHz, START_HZ);
+  await traceAfter();
 
   await configure({ startHz: 600_000_000, stopHz: 700_000_000 });
   const after = await until(
@@ -213,30 +233,44 @@ test('retuning while sweeping moves the trace to the new range', async (t) => {
   );
   assert.equal(after.body.stopHz, 700_000_000);
   assert.equal(after.body.pointCount, 101);
+  assert.equal(unit.scan.startKhz, 600_000);
 });
 
-test('a real AXT600 added by IP fails with a reason, not silently', async (t) => {
+test('stopping the sweep stops the unit scanning', async () => {
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 1_000_000 });
+  await request('POST', `${DEVICE_PATH}/sweep/start`);
+  await until(() => unit.scanning, { what: 'the unit to scan' });
+  await request('POST', `${DEVICE_PATH}/sweep/stop`);
+  await until(() => !unit.scanning, { what: 'the unit to stop' });
+});
+
+test('the simulated AXT600 sweeps too', async (t) => {
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 200_000 }, SIM_PATH);
+  await sweeping(t, SIM_PATH);
+  const { body } = await traceAfter(0, SIM_PATH);
+  assert.equal(body.pointCount, 731);
+});
+
+test('an address with no AXT600 behind it fails with a reason', async (t) => {
+  const id = 'net:127.0.0.9';
   const added = await request('POST', '/devices', {
-    id: 'net:192.0.2.60',
+    id,
     product: PRODUCT,
-    config: { host: '192.0.2.60' },
+    config: { host: '127.0.0.9' },
   });
   assert.equal(added.status, 201);
-  t.after(() => request('DELETE', `/devices/${encodeURIComponent('net:192.0.2.60')}`));
+  t.after(() => request('DELETE', `/devices/${encodeURIComponent(id)}`));
 
-  // opening happens on first use
-  await request(
-    'POST',
-    `/devices/${encodeURIComponent('net:192.0.2.60')}/configuration`,
-    { startHz: START_HZ, stopHz: STOP_HZ }
-  );
+  await request('POST', `/devices/${encodeURIComponent(id)}/configuration`, {
+    startHz: START_HZ,
+    stopHz: STOP_HZ,
+  });
   const device = await until(
     async () => {
-      const d = await listed('net:192.0.2.60');
+      const d = await listed(id);
       return d?.status.status === 'failed' ? d : null;
     },
-    { what: 'the real unit being marked failed' }
+    { timeoutMs: 15_000, what: 'the unreachable unit being marked failed' }
   );
-  assert.match(device.status.message, /protocol still has to be captured/);
-  assert.match(device.status.message, /192\.0\.2\.60/);
+  assert.match(device.status.message, /No AXT600 is advertising at 127\.0\.0\.9/);
 });

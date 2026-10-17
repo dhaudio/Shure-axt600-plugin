@@ -7,3 +7,4 @@ runtime/
 # CPython bytecode, regenerated per interpreter version
 __pycache__/
 *.pyc
+probe-axt600-*.json

@@ -8,8 +8,9 @@
 //   - worst-case scan time per 60 MHz: 48 s, 7 s and 1 s respectively
 //   - the whole range at 25 kHz in 64 s, with 8 scanning modules in parallel
 //
-// None of these have been measured by this plugin yet. docs/protocolo.md lists
-// what to check on a real unit.
+// A capture of a unit on firmware 2.1.41 agrees on the range, the step list
+// (property 0x01070220 reads ";25;200;1000") and the 25 kHz time: one pass of
+// 470–952 MHz took 62 s.
 
 export const MIN_FREQUENCY_HZ = 470_000_000;
 export const MAX_FREQUENCY_HZ = 952_000_000;
@@ -20,9 +21,6 @@ export const DEFAULT_STEP_HZ = 200_000;
 
 /** Frequencies sit on the 25 kHz channel plan Shure equipment tunes to. */
 export const GRID_HZ = 25_000;
-
-/** The two antenna inputs, as SoundBase will label their curves. */
-export const ANTENNAS = ['A', 'B'];
 
 /**
  * The most points a trace carries. A 25 kHz scan of the whole range is 19 281

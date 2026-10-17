@@ -1,5 +1,6 @@
-// The driver on its own: scan arithmetic, sweep assembly, the simulator, and
-// the adapter's behaviour around them that the HTTP tests cannot reach.
+// The driver on its own: scan arithmetic, sweep assembly, SLP, the SDT session
+// against the fake unit, the simulator, and the adapter's behaviour around
+// them that the HTTP tests cannot reach.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -12,12 +13,10 @@ import {
 } from '../driver/scan-plan.js';
 import { SweepAssembler } from '../driver/sweep-assembler.js';
 import { SimulatedAxt600 } from '../driver/simulated-axt600.js';
-import {
-  Axt600NetworkLink,
-  createLink,
-  isSimulated,
-  ProtocolPendingError,
-} from '../driver/link.js';
+import { Axt600NetworkLink, createLink, isSimulated } from '../driver/link.js';
+import { SdtSession } from '../driver/sdt-session.js';
+import { SlpListener, parseAdvert } from '../driver/slp.js';
+import { startFakeAxt600 } from '../driver/fake-axt600.js';
 import { createSpectrumAnalyzerAdapter } from '../adapter.js';
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,67 +90,206 @@ test('scan time follows the datasheet and errs long', () => {
 // ---------------------------------------------------------------------------
 
 const smallPlan = () => planScan({ startHz: 500e6, stopHz: 501e6, rbwHz: 200e3 }); // 6 points
-const tile = (antenna, from, values) => ({
-  antenna,
-  startHz: 500e6 + from * 200e3,
-  stepHz: 200e3,
-  amplitudesDbm: values,
-});
+const tile = (from, values) => ({ startHz: 500e6 + from * 200e3, stepHz: 200e3, amplitudesDbm: values });
 
-test('a sweep is emitted only when both antennas have every point, in any order', () => {
+test('a sweep is emitted at the end of a pass, with the latest value of each point', () => {
   const sweeps = [];
-  const asm = new SweepAssembler(smallPlan(), (c, curves) => sweeps.push({ c, curves }));
-  asm.add(tile(1, 3, [-90, -91, -92]));
-  asm.add(tile(0, 0, [-80, -81, -82]));
-  asm.add(tile(0, 3, [-70, -71, -72]));
-  assert.equal(sweeps.length, 0);
-  assert.equal(asm.progress, 0.75);
-  asm.add(tile(1, 0, [-85, -60, -95]));
+  const asm = new SweepAssembler(smallPlan(), (a, info) => sweeps.push({ a, info }));
+  asm.add(tile(3, [-90, -91, -92]));
+  asm.add(tile(0, [-80, -81, -82]));
+  assert.equal(sweeps.length, 0, 'nothing before the pass ends');
+  asm.add(tile(0, [-80, -60, -82])); // the second report: the stronger antenna
+  asm.passEnd();
   assert.equal(sweeps.length, 1);
-  assert.deepEqual(sweeps[0].curves[0].amplitudesDbm, [-80, -81, -82, -70, -71, -72]);
-  assert.deepEqual(sweeps[0].c, [-80, -60, -82, -70, -71, -72]);
+  assert.deepEqual(sweeps[0].a, [-80, -60, -82, -90, -91, -92]);
+  assert.deepEqual(sweeps[0].info.missing, []);
 });
 
-test('every pass refreshes all points before the next sweep', () => {
+test('points a pass never reported are filled with its floor and listed', () => {
   const sweeps = [];
-  const asm = new SweepAssembler(smallPlan(), (c) => sweeps.push(c));
-  const full = (v) => {
-    asm.add(tile(0, 0, Array(6).fill(v)));
-    asm.add(tile(1, 0, Array(6).fill(v)));
-  };
-  full(-90);
-  asm.add(tile(0, 0, Array(6).fill(-50))); // half a pass: nothing yet
-  assert.equal(sweeps.length, 1);
-  asm.add(tile(1, 0, Array(6).fill(-95)));
-  assert.equal(sweeps.length, 2);
-  assert.deepEqual(sweeps[1], Array(6).fill(-50));
+  const asm = new SweepAssembler(smallPlan(), (a, info) => sweeps.push({ a, info }));
+  asm.add(tile(0, [-80, -95, -82]));
+  asm.add(tile(5, [-70]));
+  asm.passEnd();
+  assert.deepEqual(sweeps[0].a, [-80, -95, -82, -95, -95, -70]);
+  assert.deepEqual(sweeps[0].info.missing, [[500.6e6, 500.8e6]]);
 });
 
-test('a tile off the plan axis is counted and ignored, never misplaced', () => {
-  const asm = new SweepAssembler(smallPlan(), () => assert.fail('no sweep'));
-  asm.add({ antenna: 0, startHz: 500e6 + 100e3, stepHz: 200e3, amplitudesDbm: [-1] });
-  asm.add({ antenna: 0, startHz: 500e6, stepHz: 25e3, amplitudesDbm: [-1] });
+test('each pass starts afresh, and an empty pass emits nothing', () => {
+  const sweeps = [];
+  const asm = new SweepAssembler(smallPlan(), (a, info) => sweeps.push(info));
+  asm.add(tile(0, Array(6).fill(-90)));
+  asm.passEnd();
+  asm.passEnd();
+  assert.equal(sweeps.length, 1);
+  asm.add(tile(0, [-90]));
+  asm.passEnd();
+  assert.equal(sweeps[1].missing.length, 1);
+});
+
+test('a tile off the plan axis, or a garbage reading, is never drawn', () => {
+  const sweeps = [];
+  const asm = new SweepAssembler(smallPlan(), (a) => sweeps.push(a));
+  asm.add({ startHz: 500e6 + 100e3, stepHz: 200e3, amplitudesDbm: [-1] });
+  asm.add({ startHz: 500e6, stepHz: 25e3, amplitudesDbm: [-1] });
+  asm.add(tile(0, [3276.7, -90]));
+  asm.passEnd();
   assert.equal(asm.misaligned, 2);
-  assert.equal(asm.progress, 0);
+  assert.equal(sweeps[0][0], -90);
+});
+
+// ---------------------------------------------------------------------------
+// SLP
+// ---------------------------------------------------------------------------
+
+// the advert a unit on firmware 2.1.41 sends, from a capture
+const REAL_ADVERT = Buffer.from(
+  '\x02\x07\x00\x015\x00\x00\x00\x00\x00"=\x00\x02en\x00\x00\x01 (cid=A1B2C3D4-0000-11DD-A000-000EDDCCCCCC),' +
+    '(acn-fctn=AXT600),(acn-uacn=AXT600),(acn-services=esta.dmp),' +
+    '(csl-esta.dmp=esta.sdt/192.168.1.3:57383;esta.dmp/cd:CCC57006-E139-11DF-9451-0015C5F3F612),' +
+    '(device-description=$:tftp://192.168.1.3/$.ddl),(csl-esta.dmp.values=version:1_interfaceId:48)\x00',
+  'latin1'
+);
+
+test('a real AXT600 advert parses to its address, port and component id', () => {
+  const advert = parseAdvert(REAL_ADVERT);
+  assert.equal(advert.host, '192.168.1.3');
+  assert.equal(advert.port, 57383);
+  assert.equal(advert.fctn, 'AXT600');
+  assert.equal(advert.cid.toString('hex'), 'a1b2c3d4000011dda000000eddcccccc');
+  assert.equal(parseAdvert(Buffer.from('(acn-fctn=WWB6)')), null);
+});
+
+// ---------------------------------------------------------------------------
+// the SDT session and the network link, against the fake unit
+// ---------------------------------------------------------------------------
+
+const freePort = async () => {
+  const dgram = await import('node:dgram');
+  const s = dgram.createSocket('udp4');
+  await new Promise((r) => s.bind(0, '127.0.0.1', r));
+  const { port } = s.address();
+  await new Promise((r) => s.close(r));
+  return port;
+};
+
+test('a session joins, reads, writes and leaves', async (t) => {
+  const unit = await startFakeAxt600();
+  t.after(() => unit.close());
+  const session = new SdtSession({ host: unit.host, port: unit.port, deviceCid: unit.cid });
+  await session.open();
+  const values = await session.get([0x01000012, 0x01070220, 0x0badf00d]);
+  assert.equal(values.get(0x01000012).subarray(2).toString(), 'AXT600');
+  assert.equal(values.get(0x01070220).subarray(2).toString(), ';25;200;1000');
+  assert.equal(values.get(0x0badf00d), null);
+  await session.set([[0x01070102, Buffer.from([0, 0, 0, 200])]]);
+  assert.equal(unit.scan.stepKhz, 200);
+  await session.close();
+  await delay(50);
+  assert.equal(unit.state.left, true);
+});
+
+test('a refused join says why', async (t) => {
+  const unit = await startFakeAxt600({ refuseJoin: true });
+  t.after(() => unit.close());
+  const session = new SdtSession({ host: unit.host, port: unit.port, deviceCid: unit.cid });
+  await assert.rejects(session.open(), /refused the session.*Wireless Workbench/);
+});
+
+test('a unit that goes quiet is reported as lost', async (t) => {
+  const unit = await startFakeAxt600();
+  t.after(() => unit.close());
+  const session = new SdtSession({ host: unit.host, port: unit.port, deviceCid: unit.cid });
+  await session.open();
+  const lost = new Promise((resolve) => (session.onFatal = resolve));
+  unit.silence();
+  const err = await lost;
+  assert.match(err.message, /stopped answering/);
+});
+
+test('the link finds the unit by its advert and scans it', async (t) => {
+  const slpPort = await freePort();
+  const unit = await startFakeAxt600({ slpPort });
+  const slp = new SlpListener({ port: slpPort, multicast: false });
+  t.after(async () => {
+    slp.close();
+    await unit.close();
+  });
+  const link = new Axt600NetworkLink({ host: unit.host, slp });
+  const identity = await link.connect();
+  assert.deepEqual(identity, { model: 'AXT600', firmware: '2.1.41', name: 'AXT600' });
+
+  const plan = planScan({ startHz: 470e6, stopHz: 616e6, rbwHz: 200e3 });
+  await link.configureScan(plan);
+  const sweeps = [];
+  const asm = new SweepAssembler(plan, (a) => sweeps.push(a));
+  await link.startScan((tl) => asm.add(tl), () => asm.passEnd());
+  while (sweeps.length < 2) await delay(10);
+  await link.stopScan();
+  link.close();
+  assert.equal(asm.misaligned, 0);
+  assert.equal(sweeps[0].length, 731);
+});
+
+const scanEvent = (index, values) => {
+  const value = Buffer.alloc(values.length * 2);
+  values.forEach((v, i) => value.writeInt16BE(Math.round(v * 10), 2 * i));
+  return { vector: 4, single: false, address: 0x10000000 + index, increment: 1, count: values.length, value };
+};
+
+test('scan indexes count steps from the start', () => {
+  const link = new Axt600NetworkLink({ host: 'x' });
+  link.scan = { startHz: 500e6, stepHz: 200e3, deviceCount: 6 };
+  const tiles = [];
+  link.onTile = (tl) => tiles.push(tl);
+  link.handleDmp([scanEvent(2, [-90, -91])]);
+  assert.deepEqual(tiles, [{ startHz: 500.4e6, stepHz: 200e3, amplitudesDbm: [-90, -91] }]);
+});
+
+test('scan indexes past the end are read on the 25 kHz band grid instead', () => {
+  const link = new Axt600NetworkLink({ host: 'x', log: () => {} });
+  link.scan = { startHz: 500e6, stepHz: 200e3, deviceCount: 6 };
+  const tiles = [];
+  link.onTile = (tl) => tiles.push(tl);
+  // 470 MHz + 1200 x 25 kHz = 500 MHz; every eighth point is on the 200 kHz axis
+  link.handleDmp([scanEvent(1200, [-90, -1, -1, -1, -1, -1, -1, -1, -91])]);
+  assert.equal(link.indexMode, 'absolute');
+  assert.deepEqual(
+    tiles.map((tl) => [tl.startHz, tl.amplitudesDbm[0]]),
+    [[500e6, -90], [500.2e6, -91]]
+  );
+});
+
+test('a pass ends when progress reaches 100 %', () => {
+  const link = new Axt600NetworkLink({ host: 'x' });
+  let ends = 0;
+  link.onPassEnd = () => (ends += 1);
+  const progress = (pct) => ({ vector: 4, single: true, address: 0x01070110, value: Buffer.from([pct]) });
+  link.handleDmp([progress(0)]);
+  link.handleDmp([progress(95)]);
+  link.handleDmp([progress(100)]);
+  link.handleDmp([progress(100)]);
+  link.handleDmp([progress(5)]);
+  link.handleDmp([progress(100)]);
+  assert.equal(ends, 2);
 });
 
 // ---------------------------------------------------------------------------
 // simulator
 // ---------------------------------------------------------------------------
 
-test('the simulator delivers complete passes on both antennas', async () => {
+test('the simulator delivers complete passes', async () => {
   const sim = new SimulatedAxt600({ timeScale: 0.002 });
   await sim.connect();
   const plan = planScan({ startHz: 470e6, stopHz: 616e6, rbwHz: 200e3 });
   await sim.configureScan(plan);
   const sweeps = [];
-  const asm = new SweepAssembler(plan, (c, curves) => sweeps.push(curves));
-  await sim.startScan((t) => asm.add(t));
+  const asm = new SweepAssembler(plan, (a, info) => sweeps.push(info));
+  await sim.startScan((tl) => asm.add(tl), () => asm.passEnd());
   while (sweeps.length < 2) await delay(10);
   sim.close();
   assert.equal(asm.misaligned, 0);
-  assert.deepEqual(sweeps[0].map((c) => c.name), ['A', 'B']);
-  assert.notDeepEqual(sweeps[0][0].amplitudesDbm, sweeps[0][1].amplitudesDbm);
+  assert.deepEqual(sweeps[0].missing, []);
 });
 
 test('nothing arrives after the scan is stopped', async () => {
@@ -159,7 +297,7 @@ test('nothing arrives after the scan is stopped', async () => {
   await sim.connect();
   await sim.configureScan(planScan({ rbwHz: 1e6 }));
   let tiles = 0;
-  await sim.startScan(() => (tiles += 1));
+  await sim.startScan(() => (tiles += 1), () => {});
   await sim.stopScan();
   const after = tiles;
   await delay(80);
@@ -167,24 +305,12 @@ test('nothing arrives after the scan is stopped', async () => {
   sim.close();
 });
 
-// ---------------------------------------------------------------------------
-// links
-// ---------------------------------------------------------------------------
-
 test('which link a device gets', () => {
   assert.ok(isSimulated({ id: 'sim:axt600' }));
   assert.ok(isSimulated({ id: 'net:x', config: { host: 'simulated' } }));
   assert.ok(!isSimulated({ id: 'net:10.0.0.5', config: { host: '10.0.0.5' } }));
   assert.ok(createLink({ id: 'sim:axt600' }) instanceof SimulatedAxt600);
-  assert.ok(
-    createLink({ id: 'net:10.0.0.5' }, { host: '10.0.0.5' }) instanceof Axt600NetworkLink
-  );
-});
-
-test('the network link refuses plainly until the protocol exists', async () => {
-  const link = new Axt600NetworkLink({ host: '10.0.0.5' });
-  await assert.rejects(link.connect(), ProtocolPendingError);
-  await assert.rejects(link.connect(), /10\.0\.0\.5/);
+  assert.ok(createLink({ id: 'net:10.0.0.5' }, { host: '10.0.0.5' }) instanceof Axt600NetworkLink);
 });
 
 // ---------------------------------------------------------------------------
@@ -223,8 +349,5 @@ test('a dropped link is reported as fatal', async () => {
 });
 
 test('a device with no address says so', () => {
-  assert.throws(
-    () => createSpectrumAnalyzerAdapter({ id: 'something' }),
-    /no address/
-  );
+  assert.throws(() => createSpectrumAnalyzerAdapter({ id: 'something' }), /no address/);
 });

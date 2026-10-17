@@ -2,31 +2,50 @@
 
 Plugin de SoundBase que convierte un **Shure AXT600 Axient Spectrum Manager**
 en un analizador de espectro en vivo: su escaneo pasa a ser la traza del
-gráfico, con el máximo de las dos antenas como traza principal y las antenas
-**A** y **B** como curvas propias.
+gráfico. En cada frecuencia, la traza muestra el nivel más fuerte de las dos
+antenas, que es lo que reporta el propio equipo.
 
 Creado a partir de
 [soundbase-plugin-template](https://github.com/soundbase-lab/soundbase-plugin-template).
 
-> **Estado: funciona con un AXT600 simulado; todavía no habla con uno real.**
-> Shure no publica el protocolo de red del AXT600, así que hay que capturarlo
-> de tu equipo con Wireshark mientras Wireless Workbench escanea.
-> [docs/protocolo.md](docs/protocolo.md) explica cómo hacerlo. Todo lo demás
-> (ajustes, ensamblado de barridos, avisos, tests) ya está hecho y no cambiará
-> cuando llegue el driver real.
+> **Estado: el driver real está escrito, pero falta probarlo con el equipo.**
+> Habla el protocolo del AXT600 tal como se ve en capturas de Wireless
+> Workbench con una unidad de firmware 2.1.41: ACN estándar, sin cifrar
+> ([docs/protocolo.md](docs/protocolo.md)). Los paquetes que envía son, byte a
+> byte, los de Wireless Workbench. Lo siguiente es ejecutar
+> `npm run probe` con el equipo ([abajo](#probarlo-con-tu-axt600)).
 
-## Probarlo ahora, sin el equipo
+## Antes de empezar
+
+- **El AXT600 en la misma red (subred) que el ordenador**, por cable.
+- **Wireless Workbench cerrado** mientras el plugin escanea.
+- Node.js 20 o superior, para desarrollar y para `npm run probe`.
+
+## Probarlo con tu AXT600
 
 ```sh
 npm install
-npm test                   # 39 tests: contrato, plan de escaneo, simulador
+npm run probe -- 192.168.1.3
+```
+
+El script encuentra el equipo por su anuncio en la red, abre una sesión, lee el
+modelo y el firmware, y escanea 470–616 MHz a 200 kHz durante dos pasadas.
+Después para y se desconecta. Muestra lo que ocurre y guarda un informe
+`probe-axt600-<fecha>.json`. Opciones: `--start 470 --stop 616 --step 200
+--passes 2` (MHz, MHz, kHz).
+
+Solo escribe en el equipo lo mismo que Wireless Workbench al pulsar Scan:
+el rango, el paso, empezar y parar.
+
+## Probarlo sin el equipo
+
+```sh
+npm test                   # contrato, protocolo y driver, sin nada conectado
 SB_AXT600_MOCK=1 npm start # un AXT600 simulado, para probarlo con curl
 ```
 
-Dentro de SoundBase, activa **Simulated AXT600** en los ajustes del plugin y
-aparecerá en el selector de dispositivos. El simulador tarda lo mismo que el
-equipo real (unos 9 s por pasada a 200 kHz entre 470 y 616 MHz);
-`SB_AXT600_SIM_TIMESCALE=0.1` lo acelera diez veces.
+Dentro de SoundBase, activa **Simulated AXT600** en los ajustes del plugin.
+Los AXT600 reales de la red aparecen solos en el selector de dispositivos.
 
 ## Cómo se traducen los ajustes de SoundBase
 
@@ -47,30 +66,40 @@ Diferencias con otros analizadores:
   a 25 kHz y 64 s para todo el rango. El plugin avisa a SoundBase del tiempo
   esperado, para que no lo tome por un equipo colgado, y muestra un aviso
   mientras se completa la primera pasada.
-- **Los datos llegan por bloques.** Los 8 módulos de escaneo terminan cada uno
-  su bloque cuando pueden; la traza se emite cuando las dos antenas han cubierto
-  todo el rango.
+- **La traza se actualiza una vez por pasada.** Los 8 módulos de escaneo mandan
+  sus bloques en paralelo y cada punto llega dos veces (una antena, y después
+  el máximo de las dos). La traza se emite cuando el equipo marca el 100 %.
+- **Sin curvas por antena.** El AXT600 no indica qué antena es cada lectura,
+  así que solo hay una traza.
+- **Tramos sin datos.** Si el equipo no reporta parte del rango (en la captura
+  de referencia no envió 865–925 MHz), esos puntos muestran el suelo de ruido y
+  SoundBase muestra un aviso.
 
 ## Estructura
 
 ```
 adapter.js                  descubrimiento, capacidades, recortar y devolver, avisos
 driver/
-  link.js                   la interfaz con el equipo; Axt600NetworkLink, pendiente
-  scan-plan.js              qué se puede pedir y qué vuelve (datos del datasheet)
+  acn.js                    ACN: capa raíz, SDT y DMP (codificar y decodificar)
+  sdt-session.js            una sesión con el equipo: join, keep-alive, get/set/sub
+  slp.js                    escuchar los anuncios de los AXT600 de la red
+  axt600-link.js            el AXT600 real: propiedades, escaneo, datos
+  link.js                   qué link usa cada dispositivo
+  scan-plan.js              qué se puede pedir y qué vuelve
   sweep-assembler.js        bloques de escaneo -> barridos completos
-  simulated-axt600.js       un AXT600 simulado: 2 antenas, 8 módulos, tiempos reales
-docs/protocolo.md           cómo capturar el protocolo con Wireshark
-__tests__/                  tests del contrato (por HTTP) y del driver
+  simulated-axt600.js       un AXT600 simulado, dentro del proceso
+  fake-axt600.js            un AXT600 falso por UDP, para los tests
+scripts/probe-axt600.mjs    probar el driver con un equipo real
+docs/protocolo.md           el protocolo, tal como se ha descifrado
+__tests__/                  contrato (HTTP), protocolo (bytes reales) y driver
 ```
 
 Comprobaciones, en orden:
 
 ```sh
 npm run doctor      # ¿está bien formado el plugin?
-npm test            # el contrato y el driver, sin nada conectado
+npm test            # todo, sin nada conectado
 npm run smoke       # arranca main.js como proceso hijo, como hace SoundBase
-SB_AXT600_MOCK=1 npm run smoke   # igual, recorriendo también el barrido
 ```
 
 Variables de entorno, todas opcionales:
@@ -79,15 +108,15 @@ Variables de entorno, todas opcionales:
 |---|---|
 | `SB_AXT600_MOCK=1` | Lista el AXT600 simulado aunque el ajuste del plugin esté desactivado. |
 | `SB_AXT600_SIM_TIMESCALE` | Multiplica los tiempos del simulador (1 = tiempo real). |
+| `SB_AXT600_SLP_PORT` | Escucha los anuncios en ese puerto de loopback (tests). |
 
 ## Siguientes pasos
 
-1. Capturar el protocolo de tu AXT600 ([docs/protocolo.md](docs/protocolo.md)).
-2. Escribir `Axt600NetworkLink` a partir de las capturas, con un AXT600 falso
-   que responda igual para los tests.
-3. Descubrimiento automático en la red, si el equipo se anuncia.
-4. Primera prueba con el equipo y medir los tiempos reales de escaneo.
-5. Poner tu repositorio en el campo `repository` de `soundbase-plugin.json`.
+1. `npm run probe` con el equipo, y ajustar lo que haga falta
+   ([lo que falta confirmar](docs/protocolo.md#lo-que-falta-confirmar-con-el-equipo)).
+2. Medir los tiempos reales de escaneo a 200 kHz y 1 MHz.
+3. Probarlo dentro de SoundBase Desktop.
+4. Publicar una release y enviarla al Lab.
 
 La guía de la plantilla está en [docs/](docs/README.md) (en inglés), y
 [CLAUDE.md](CLAUDE.md) resume el modelo de plugin.
@@ -96,6 +125,11 @@ La guía de la plantilla está en [docs/](docs/README.md) (en inglés), y
 
 La plantilla y `@soundbase/plugin-shell` están bajo la Business Source License
 1.1 (ver `LICENSE`). Tu propio código es tuyo.
+
+Sobre cómo habla con el equipo: el plugin usa ACN (ANSI E1.17), un estándar
+público. El AXT600 no cifra su sesión, y el plugin no contiene claves ni código
+obtenido del software de Shure. No se anuncia como Wireless Workbench. Su
+identificador ACN usa el mismo sufijo que los equipos Shure.
 
 Este plugin no está afiliado, autorizado ni respaldado por Shure Incorporated.
 "Shure", "AXT600", "Axient" y "Wireless Workbench" son marcas de su titular y se

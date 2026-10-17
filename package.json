@@ -16,7 +16,8 @@
     "smoke": "node scripts/smoke.mjs",
     "rename": "node scripts/rename.mjs",
     "bump": "node scripts/bump-version.mjs",
-    "pack:release": "node scripts/pack-release.mjs"
+    "pack:release": "node scripts/pack-release.mjs",
+    "probe": "node scripts/probe-axt600.mjs"
   },
   "dependencies": {
     "@soundbase/plugin-contract": "^0.12.2",
