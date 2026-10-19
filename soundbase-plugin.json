@@ -64,6 +64,12 @@
       "label": "Simulated AXT600",
       "default": false,
       "help": "Adds a pretend AXT600 to the device picker, scanning at the speed a real one does, so the plugin can be tried without the hardware. Real AXT600s on the network are found by themselves."
+    },
+    {
+      "id": "recordFolder",
+      "type": "textinput",
+      "label": "Recording folder",
+      "help": "Where \"Record passes to disk\" saves its CSV files. Leave empty for Documents/SoundBase AXT600 recordings."
     }
   ],
   "stateKeys": [],

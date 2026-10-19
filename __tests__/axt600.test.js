@@ -250,6 +250,22 @@ test('the progressive control is declared and echoed', async () => {
   assert.equal(on.body.controls.progressive, true);
 });
 
+test('offset, alert and recording controls are declared, clamped and echoed', async () => {
+  const caps = (await listed()).capabilities;
+  const ids = caps.controls.map((c) => c.id);
+  for (const id of ['offsetDb', 'alertEnabled', 'alertThresholdDbm', 'alertRanges', 'alertPasses', 'record']) {
+    assert.ok(ids.includes(id), id);
+  }
+  const { status, body } = await configure({
+    controls: { offsetDb: 99, alertRanges: '606.5 - 614,518-530', alertPasses: 50 },
+  });
+  assert.equal(status, 200);
+  assert.equal(body.controls.offsetDb, 40);
+  assert.equal(body.controls.alertRanges, '606.5-614, 518-530');
+  assert.equal(body.controls.alertPasses, 20);
+  await configure({ controls: { offsetDb: 0, alertRanges: '', alertPasses: 2 } });
+});
+
 test('a request that changes nothing the unit sweeps leaves it scanning', async (t) => {
   await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 1_000_000 });
   await sweeping(t);

@@ -22,6 +22,9 @@ import {
   planScan,
 } from './driver/scan-plan.js';
 import { SweepAssembler } from './driver/sweep-assembler.js';
+import { CONTROLS, CONTROL_DEFAULTS, settleControls } from './driver/controls.js';
+import { ThresholdAlert, parseRanges } from './driver/alerts.js';
+import { PassRecorder } from './driver/recorder.js';
 
 // MUST be a deviceTypeId declared in soundbase-plugin.json; a test checks it.
 export const PRODUCT = 'plugin:shure-axt600/axt600';
@@ -68,13 +71,21 @@ export async function discoverDevices(pluginConfig = {}) {
   return found;
 }
 
-export function createSpectrumAnalyzerAdapter(device) {
-  return new Axt600Adapter(device);
+export function createSpectrumAnalyzerAdapter(device, pluginConfig = {}) {
+  return new Axt600Adapter(device, pluginConfig);
 }
 
+const round1 = (v) => Math.round(v * 10) / 10;
+
 class Axt600Adapter {
-  constructor(device) {
+  constructor(device, pluginConfig = {}) {
     this.device = device;
+    this.pluginConfig = pluginConfig;
+    this.controls = { ...CONTROL_DEFAULTS };
+    this.alert = null;
+    this.recorder = null;
+    this.warningsById = new Map();
+    this.unitName = 'AXT600';
     ({ host: this.host, cid: this.cid } = addressOf(device));
     this.link = null;
     this.plan = null;
@@ -82,7 +93,6 @@ class Axt600Adapter {
     this.onTrace = null;
     this.sweeping = false;
     this.warnings = [];
-    this.progressive = true;
     /** assigned by the shell */
     this.onFatal = null;
     this.onWarnings = null;
@@ -100,6 +110,9 @@ class Axt600Adapter {
       this.onFatal?.(err);
     };
     const identity = await this.link.connect();
+    this.unitName = [identity.name ?? identity.model ?? 'AXT600', this.link.host]
+      .filter((x) => x && x !== 'simulated')
+      .join('-');
 
     return {
       capabilities: {
@@ -107,19 +120,7 @@ class Axt600Adapter {
         maxFrequencyHz: MAX_FREQUENCY_HZ,
         // the AXT600's three scan steps are its resolution
         rbwHz: [...STEPS_HZ],
-        controls: [
-          {
-            id: 'progressive',
-            type: 'checkbox',
-            label: 'Update during each pass',
-            default: true,
-            help:
-              'Draw each part of the range as soon as the AXT600 reports it, instead of ' +
-              'once a pass is complete — a pass takes about 7 s at 200 kHz and up to a ' +
-              'minute at 25 kHz. Turn it off for an exact average trace: with it on, ' +
-              'the average counts unchanged parts of the range more than once.',
-          },
-        ],
+        controls: CONTROLS.map((c) => ({ ...c })),
       },
       identity: {
         manufacturer: 'Shure',
@@ -137,9 +138,8 @@ class Axt600Adapter {
    */
   async applyConfig(cfg = {}) {
     // device controls: merged by the shell, so the whole set arrives each time
-    const progressive = cfg.controls?.progressive;
-    const wasProgressive = this.progressive;
-    if (progressive !== undefined && progressive !== null) this.progressive = Boolean(progressive);
+    const before = this.controls;
+    this.controls = settleControls(cfg.controls, before);
 
     let plan = planScan(cfg, this.plan);
     const differs = (a, b) =>
@@ -165,17 +165,19 @@ class Axt600Adapter {
       if (this.sweeping) await this.#restartScan();
     } else {
       this.plan = plan;
-      if (this.sweeping && this.assembler && wasProgressive !== this.progressive) {
-        this.assembler.progressive = this.progressive;
-        if (!this.progressive) this.assembler.dispose();
+      if (this.sweeping && this.assembler && before.progressive !== this.controls.progressive) {
+        this.assembler.progressive = this.controls.progressive;
+        if (!this.controls.progressive) this.assembler.dispose();
       }
+      if (this.sweeping && before.record !== this.controls.record) this.#startRecorder();
     }
+    this.#configureAlert(before);
 
     const effective = {
       startHz: plan.startHz,
       stopHz: plan.stopHz,
       pointCount: plan.pointCount,
-      controls: { progressive: this.progressive },
+      controls: { ...this.controls },
       resolved: { sweepTimeMs: plan.sweepTimeMs },
     };
     if (plan.stepChosen === 'rbw') effective.rbwHz = plan.stepHz;
@@ -196,7 +198,10 @@ class Axt600Adapter {
     await this.link?.stopScan();
     this.assembler?.dispose();
     this.assembler = null;
-    this.#setWarnings([]);
+    this.recorder = null;
+    this.alert = this.alert && new ThresholdAlert(this.alert);
+    this.warningsById.clear();
+    this.#publishWarnings();
   }
 
   async close() {
@@ -211,30 +216,37 @@ class Axt600Adapter {
     this.assembler?.dispose();
     const assembler = new SweepAssembler(
       this.plan,
-      (amplitudes, { missing, complete }) => {
+      (raw, { missing, complete }) => {
         if (!this.sweeping || this.assembler !== assembler) return;
+        const offset = this.controls.offsetDb;
+        const amplitudes = offset ? raw.map((v) => round1(v + offset)) : raw;
         // until a first pass completes, the filling notice stays: parts of the
         // range not yet scanned show the lowest level seen so far
-        if (complete) this.#setWarnings(missing.length ? [gapWarning(missing)] : []);
+        if (complete) {
+          this.#warn('scan-filling', null);
+          this.#warn('scan-gaps', missing.length ? gapWarning(missing) : null);
+          if (this.alert) this.#warn('threshold-alert', this.alert.check(amplitudes, this.#axis()));
+          this.recorder?.record(amplitudes);
+        }
         this.onTrace?.(amplitudes);
       },
-      { progressive: this.progressive }
+      { progressive: this.controls.progressive }
     );
     this.assembler = assembler;
+    this.#startRecorder();
+    if (this.alert) this.alert = new ThresholdAlert(this.alert);
 
     if (this.plan.sweepTimeMs >= FILLING_NOTICE_MS) {
       const seconds = Math.round(this.plan.sweepTimeMs / 1000);
-      this.#setWarnings([
-        {
-          id: 'scan-filling',
-          severity: 'info',
-          message:
-            `The AXT600 is scanning; at this range and resolution a full pass ` +
-            `takes up to ${seconds} s. Until the first pass is complete, parts of the ` +
-            `range not yet scanned show the noise floor. A coarser RBW or a narrower ` +
-            `range is faster.`,
-        },
-      ]);
+      this.#warn('scan-filling', {
+        id: 'scan-filling',
+        severity: 'info',
+        message:
+          `The AXT600 is scanning; at this range and resolution a full pass ` +
+          `takes up to ${seconds} s. Until the first pass is complete, parts of the ` +
+          `range not yet scanned show the noise floor. A coarser RBW or a narrower ` +
+          `range is faster.`,
+      });
     }
 
     await this.link.startScan(
@@ -248,7 +260,57 @@ class Axt600Adapter {
     await this.#beginScan();
   }
 
-  #setWarnings(warnings) {
+  /** The trace's frequency axis, after any coarsening of a long scan. */
+  #axis() {
+    const { startHz, stepHz, decimation, pointCount } = this.plan;
+    return { startHz, stepHz: stepHz * decimation, pointCount };
+  }
+
+  #configureAlert(before) {
+    const c = this.controls;
+    if (!c.alertEnabled) {
+      this.alert = null;
+      if (before.alertEnabled) this.#warn('threshold-alert', null);
+      return;
+    }
+    const changed =
+      !this.alert ||
+      before.alertThresholdDbm !== c.alertThresholdDbm ||
+      before.alertRanges !== c.alertRanges ||
+      before.alertPasses !== c.alertPasses;
+    if (changed) {
+      this.alert = new ThresholdAlert({
+        thresholdDbm: c.alertThresholdDbm,
+        ranges: parseRanges(c.alertRanges),
+        passes: c.alertPasses,
+      });
+      this.#warn('threshold-alert', null);
+    }
+  }
+
+  #startRecorder() {
+    if (!this.controls.record || !this.plan) {
+      this.recorder = null;
+      return;
+    }
+    const step = this.plan.stepHz / 1000;
+    this.recorder = new PassRecorder({
+      folder: this.pluginConfig.recordFolder?.trim() || undefined,
+      name: this.unitName,
+      axis: this.#axis(),
+      note: `step ${step} kHz, level offset ${this.controls.offsetDb} dB`,
+      log: (m) => logLine('info', `[${this.device.id}] ${m}`),
+    });
+  }
+
+  #warn(id, warning) {
+    if (warning) this.warningsById.set(id, warning);
+    else this.warningsById.delete(id);
+    this.#publishWarnings();
+  }
+
+  #publishWarnings() {
+    const warnings = [...this.warningsById.values()];
     const same =
       warnings.length === this.warnings.length &&
       warnings.every((w, i) => w.id === this.warnings[i].id && w.message === this.warnings[i].message);
