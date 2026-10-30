@@ -52,6 +52,10 @@ Los AXT600 reales de la red aparecen solos en el selector de dispositivos. Se
 identifican por su ID ACN, no por su IP, así que si le cambias la IP a un
 equipo, tus proyectos lo siguen reconociendo.
 
+Si un mismo AXT600 sale dos veces en la lista (encontrado en la red y añadido
+por su IP), usa solo una entrada: el plugin no abre el mismo equipo dos veces a
+la vez y lo indica con un mensaje. Cada entrada muestra la IP del equipo.
+
 ## Ajustes del equipo en SoundBase
 
 Además de rango, RBW y puntos, el AXT600 añade estos controles en los ajustes

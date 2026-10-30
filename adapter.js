@@ -109,7 +109,14 @@ class Axt600Adapter {
       this.sweeping = false;
       this.onFatal?.(err);
     };
-    const identity = await this.link.connect();
+    let identity;
+    try {
+      identity = await this.link.connect();
+    } catch (err) {
+      this.link.close();
+      this.link = null;
+      throw err;
+    }
     this.unitName = [identity.name ?? identity.model ?? 'AXT600', this.link.host]
       .filter((x) => x && x !== 'simulated')
       .join('-');
@@ -126,7 +133,10 @@ class Axt600Adapter {
         manufacturer: 'Shure',
         model: identity.model ?? 'AXT600',
         firmware: identity.firmware,
-        ...(identity.name ? { name: identity.name } : {}),
+        // with the address, so two entries for one unit are told apart
+        ...(identity.name
+          ? { name: this.link.host && this.link.host !== 'simulated' ? `${identity.name} (${this.link.host})` : identity.name }
+          : {}),
       },
     };
   }

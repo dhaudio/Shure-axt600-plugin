@@ -297,7 +297,8 @@ test('the simulated AXT600 sweeps too', async (t) => {
   assert.equal(body.pointCount, 731);
 });
 
-test('a unit added by hand with its address works too', async (t) => {
+test('the same unit added again by its address is refused while it is open', async (t) => {
+  // SoundBase can list one AXT600 twice; two sessions to it stalled both
   const id = `net:${unit.host}`;
   const added = await request('POST', '/devices', { id, product: PRODUCT, config: { host: unit.host } });
   assert.equal(added.status, 201);
@@ -307,8 +308,8 @@ test('a unit added by hand with its address works too', async (t) => {
     stopHz: STOP_HZ,
     rbwHz: 1_000_000,
   });
-  assert.equal(status, 200);
-  assert.equal(body.pointCount, 147);
+  assert.notEqual(status, 200);
+  assert.match(JSON.stringify(body), /use only one/);
 });
 
 test('an address with no AXT600 behind it fails with a reason', async (t) => {

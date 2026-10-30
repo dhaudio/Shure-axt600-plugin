@@ -56,6 +56,15 @@ const DATA_END = 0x1fffffff;
 const GRID_ORIGIN_HZ = 470_000_000;
 const GRID_HZ = 25_000;
 
+// The units this process has a session with, by component id and by address.
+// SoundBase can list one AXT600 twice (as found on the network and as added by
+// its IP); a second session to the same unit stalls both, so it is refused.
+const inUse = new Map(); // 'cid:<hex>' | 'host:<ip>' -> link
+
+function claimKeys(host, cid) {
+  return [cid ? `cid:${Buffer.from(cid).toString('hex')}` : null, host ? `host:${host}` : null].filter(Boolean);
+}
+
 export class Axt600NetworkLink {
   constructor({ host, cid = null, port = null, slp, log = () => {} }) {
     this.host = host;
@@ -98,6 +107,8 @@ export class Axt600NetworkLink {
       }
     }
 
+    this.#claim(this.host, cid);
+
     this.session = new SdtSession({
       host: this.host,
       port: port ?? undefined,
@@ -111,7 +122,13 @@ export class Axt600NetworkLink {
     });
     this.session.onFatal = (err) => this.onFatal?.(err);
     this.session.onDmp = (items) => this.handleDmp(items);
-    await this.session.open();
+    try {
+      await this.session.open();
+    } catch (err) {
+      this.session = null;
+      this.#release();
+      throw err;
+    }
 
     const values = await this.session.get([P.MODEL, P.FIRMWARE]);
     const fw = values.get(P.FIRMWARE);
@@ -274,10 +291,33 @@ export class Axt600NetworkLink {
     }
   }
 
+  #claimed = [];
+
+  #claim(host, cid) {
+    const keys = claimKeys(host, cid);
+    const holder = keys.map((k) => inUse.get(k)).find((l) => l && l !== this);
+    if (holder) {
+      throw new SessionError(
+        `This AXT600 (${host}) is already open in SoundBase under another device entry. ` +
+          `The same unit can appear twice in the list (found on the network and added by its IP): ` +
+          `use only one of them and close the other first.`,
+        'in_use'
+      );
+    }
+    for (const k of keys) inUse.set(k, this);
+    this.#claimed = keys;
+  }
+
+  #release() {
+    for (const k of this.#claimed) if (inUse.get(k) === this) inUse.delete(k);
+    this.#claimed = [];
+  }
+
   close() {
     this.onFatal = null;
     const session = this.session;
     this.session = null;
+    this.#release();
     session?.close();
   }
 

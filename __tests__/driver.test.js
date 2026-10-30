@@ -440,6 +440,24 @@ test('the link finds the unit by its advert and scans it', async (t) => {
   assert.equal(sweeps[0].length, 731);
 });
 
+test('one unit listed twice (by id and by address) is opened only once', async (t) => {
+  // SoundBase showed the same AXT600 as acn:… and net:…; opening both stalled both
+  const slpPort = await freePort();
+  const unit = await startFakeAxt600({ slpPort });
+  const slp = new SlpListener({ port: slpPort, multicast: false });
+  t.after(async () => {
+    slp.close();
+    await unit.close();
+  });
+  const byId = new Axt600NetworkLink({ cid: unit.cid, slp });
+  const byAddress = new Axt600NetworkLink({ host: unit.host, slp });
+  await byId.connect();
+  await assert.rejects(byAddress.connect(), (err) => err.code === 'in_use' && /use only one/.test(err.message));
+  byId.close();
+  await byAddress.connect(); // free again once the first is closed
+  byAddress.close();
+});
+
 test('a unit left scanning is stopped before the scan settings are written', async (t) => {
   // a real AXT600 refused every scan setting with DMP reason 5 in this state
   const unit = await startFakeAxt600({ scanningAtStart: true });
