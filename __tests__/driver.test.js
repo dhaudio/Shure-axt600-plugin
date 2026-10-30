@@ -607,6 +607,28 @@ test('the link finds a unit by component id alone', async (t) => {
   link.close();
 });
 
+test('when nothing is heard, the error says what to check', async (t) => {
+  const port = await freePort();
+  const slp = new SlpListener({ port, multicast: false });
+  t.after(() => slp.close());
+  const link = new Axt600NetworkLink({ host: '169.254.22.126', slp });
+  link.slp.advertFor = async () => null; // no waiting nine seconds in a test
+  await assert.rejects(link.connect(), (err) => {
+    assert.match(err.message, /No AXT600 is advertising at 169\.254\.22\.126/);
+    assert.match(err.message, /No AXT600 at all is being heard/);
+    assert.match(err.message, /169\.254 means/);
+    return true;
+  });
+});
+
+test('when the listener cannot start, the error says so', async () => {
+  const link = new Axt600NetworkLink({
+    host: '192.168.3.3',
+    slp: { unavailable: 'bind EADDRINUSE 0.0.0.0:8427', advertFor: async () => null, devices: () => [] },
+  });
+  await assert.rejects(link.connect(), /cannot listen for AXT600 adverts \(bind EADDRINUSE.*Wireless Workbench/);
+});
+
 test('a device with no address says so', () => {
   assert.throws(() => createSpectrumAnalyzerAdapter({ id: 'something' }), /no address/);
 });

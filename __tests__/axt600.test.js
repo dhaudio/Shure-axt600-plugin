@@ -333,4 +333,6 @@ test('an address with no AXT600 behind it fails with a reason', async (t) => {
     { timeoutMs: 15_000, what: 'the unreachable unit being marked failed' }
   );
   assert.match(device.status.message, /No AXT600 is advertising at 127\.0\.0\.9/);
+  // and says which units it does hear, in case this one has moved
+  assert.match(device.status.message, /AXT600s heard on this network now: 127\.0\.0\.1 \(FOH AXT600\)/);
 });

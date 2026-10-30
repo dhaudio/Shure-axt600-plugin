@@ -90,15 +90,11 @@ export class Axt600NetworkLink {
         port ??= advert.port;
         name = advert.uacn ?? null;
       } else if (!cid || !this.host) {
-        throw new SessionError(
-          cid
-            ? `The AXT600 with component ID ${cidToString(cid)} is not announcing itself on ` +
-                `any network this computer is on. Check that it is switched on and cabled to ` +
-                `this computer's network.`
-            : `No AXT600 is advertising at ${this.host}. Check that it is switched on, that ` +
-                `its address is right, and that this computer is on the same network (subnet).`,
-          'not_found'
-        );
+        const looking = cid
+          ? `The AXT600 with component ID ${cidToString(cid)} is not announcing itself on ` +
+            `any network this computer is on.`
+          : `No AXT600 is advertising at ${this.host}.`;
+        throw new SessionError(`${looking} ${this.#whatIsHeard()}`, 'not_found');
       }
     }
 
@@ -138,6 +134,36 @@ export class Axt600NetworkLink {
    * another controller, or by us before a retune — is stopped first, because
    * a unit refused every setting with DMP reason 5 when written mid-scan.
    */
+  /** What discovery can see right now, so a failure says what to fix. */
+  #whatIsHeard() {
+    const slp = this.slp;
+    if (!slp) return '';
+    if (slp.unavailable) {
+      return (
+        `This computer cannot listen for AXT600 adverts (${slp.unavailable}): another ` +
+        `program may be holding the port — quit Wireless Workbench and restart SoundBase.`
+      );
+    }
+    const heard = slp.devices();
+    if (heard.length) {
+      const list = heard.map((a) => `${a.host}${a.uacn && a.uacn !== a.fctn ? ` (${a.uacn})` : ''}`);
+      return (
+        `AXT600s heard on this network now: ${list.join(', ')}. If one of them is this ` +
+        `unit, its address has changed: pick it again in the device list, or set its IP ` +
+        `address in the device settings.`
+      );
+    }
+    const on = slp.listeningOn?.() ?? [];
+    return (
+      `No AXT600 at all is being heard` +
+      (on.length ? ` (listening on ${on.join(', ')})` : '') +
+      `. Check that it is switched on and cabled to this computer, that both are on the ` +
+      `same subnet — an address starting 169.254 means the unit or the computer found no ` +
+      `DHCP server and picked one itself — and, on Windows, that the firewall lets ` +
+      `SoundBase receive network traffic.`
+    );
+  }
+
   async configureScan({ startHz, stepHz, deviceCount }) {
     const startKhz = Math.round(startHz / 1000);
     const stepKhz = Math.round(stepHz / 1000);
