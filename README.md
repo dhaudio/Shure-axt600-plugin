@@ -48,7 +48,25 @@ SB_AXT600_MOCK=1 npm start # un AXT600 simulado, para probarlo con curl
 ```
 
 Dentro de SoundBase, activa **Simulated AXT600** en los ajustes del plugin.
-Los AXT600 reales de la red aparecen solos en el selector de dispositivos.
+Los AXT600 reales de la red aparecen solos en el selector de dispositivos. Se
+identifican por su ID ACN, no por su IP, así que si le cambias la IP a un
+equipo, tus proyectos lo siguen reconociendo.
+
+Si un mismo AXT600 sale dos veces en la lista (encontrado en la red y añadido
+por su IP), usa solo una entrada: el plugin no abre el mismo equipo dos veces a
+la vez y lo indica con un mensaje. Cada entrada muestra la IP del equipo.
+
+## Ajustes del equipo en SoundBase
+
+Además de rango, RBW y puntos, el AXT600 añade estos controles en los ajustes
+de Live Scan:
+
+| Control | Qué hace |
+|---|---|
+| **Update during each pass** | Dibuja cada parte del rango en cuanto llega (traza progresiva). Activado por defecto. |
+| **Level offset** (dB) | Se suma a cada nivel: positivo para compensar pérdidas de cable o splitter, negativo para quitar ganancia de antena o amplificador. |
+| **Threshold alert** | Avisa en SoundBase cuando una señal supera el **Alert level** en los **Watched ranges** (MHz, p. ej. `518-530, 606.5-614`; vacío = todo el escaneo) durante **Alert after passes** pasadas seguidas. |
+| **Record passes to disk** | Guarda cada pasada completa: un CSV histórico (una fila por pasada) y un CSV de max-hold que SoundBase importa como escaneo. Carpeta: ajustes del plugin, por defecto `Documentos/SoundBase AXT600 recordings`. |
 
 ## Cómo se traducen los ajustes de SoundBase
 

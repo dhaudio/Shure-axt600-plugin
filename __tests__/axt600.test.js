@@ -37,7 +37,8 @@ const manifest = JSON.parse(
   readFileSync(new URL('../soundbase-plugin.json', import.meta.url), 'utf8')
 );
 
-const DEVICE_ID = `net:${unit.host}`;
+// discovered units are known by their component id, not their address
+const DEVICE_ID = `acn:${unit.cid.toString('hex')}`;
 const DEVICE_PATH = `/devices/${encodeURIComponent(DEVICE_ID)}`;
 const SIM_PATH = `/devices/${encodeURIComponent(SIMULATED_DEVICE_ID)}`;
 const START_HZ = 470_000_000;
@@ -174,7 +175,9 @@ test('out-of-range configuration is clamped, not rejected', async () => {
 });
 
 test('a sweep arrives on the configured axis, with the venue in it', async (t) => {
-  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 200_000 });
+  // complete passes only, so the first trace has the whole range in it
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 200_000, controls: { progressive: false } });
+  t.after(() => configure({ controls: { progressive: true } }));
   await sweeping(t);
 
   const { status, body } = await traceAfter();
@@ -236,6 +239,49 @@ test('retuning while sweeping moves the trace to the new range', async (t) => {
   assert.equal(unit.scan.startKhz, 600_000);
 });
 
+test('the progressive control is declared and echoed', async () => {
+  const caps = (await listed()).capabilities;
+  const control = caps.controls.find((c) => c.id === 'progressive');
+  assert.equal(control.type, 'checkbox');
+  assert.equal(control.default, true);
+  const off = await configure({ controls: { progressive: false } });
+  assert.equal(off.body.controls.progressive, false);
+  const on = await configure({ controls: { progressive: true } });
+  assert.equal(on.body.controls.progressive, true);
+});
+
+test('offset, alert and recording controls are declared, clamped and echoed', async () => {
+  const caps = (await listed()).capabilities;
+  const ids = caps.controls.map((c) => c.id);
+  for (const id of ['offsetDb', 'alertEnabled', 'alertThresholdDbm', 'alertRanges', 'alertPasses', 'record']) {
+    assert.ok(ids.includes(id), id);
+  }
+  const { status, body } = await configure({
+    controls: { offsetDb: 99, alertRanges: '606.5 - 614,518-530', alertPasses: 50 },
+  });
+  assert.equal(status, 200);
+  assert.equal(body.controls.offsetDb, 40);
+  assert.equal(body.controls.alertRanges, '606.5-614, 518-530');
+  assert.equal(body.controls.alertPasses, 20);
+  await configure({ controls: { offsetDb: 0, alertRanges: '', alertPasses: 2 } });
+});
+
+test('a request that changes nothing the unit sweeps leaves it scanning', async (t) => {
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 1_000_000 });
+  await sweeping(t);
+  await until(() => unit.scanning, { what: 'the unit to scan' });
+  const writes = unit.state.sets.length;
+  await configure({ traceMode: 'max-hold' });
+  await configure({ controls: { progressive: false } });
+  await delay(100);
+  assert.equal(unit.scanning, true, 'still scanning');
+  assert.equal(unit.state.sets.length, writes, 'nothing written to the unit');
+  const before = await traceAfter();
+  const after = await traceAfter(before.body.sweepId);
+  assert.ok(after.body.sweepId > before.body.sweepId, 'traces keep coming');
+  await configure({ traceMode: 'clear-write', controls: { progressive: true } });
+});
+
 test('stopping the sweep stops the unit scanning', async () => {
   await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 1_000_000 });
   await request('POST', `${DEVICE_PATH}/sweep/start`);
@@ -249,6 +295,21 @@ test('the simulated AXT600 sweeps too', async (t) => {
   await sweeping(t, SIM_PATH);
   const { body } = await traceAfter(0, SIM_PATH);
   assert.equal(body.pointCount, 731);
+});
+
+test('the same unit added again by its address is refused while it is open', async (t) => {
+  // SoundBase can list one AXT600 twice; two sessions to it stalled both
+  const id = `net:${unit.host}`;
+  const added = await request('POST', '/devices', { id, product: PRODUCT, config: { host: unit.host } });
+  assert.equal(added.status, 201);
+  t.after(() => request('DELETE', `/devices/${encodeURIComponent(id)}`));
+  const { status, body } = await request('POST', `/devices/${encodeURIComponent(id)}/configuration`, {
+    startHz: START_HZ,
+    stopHz: STOP_HZ,
+    rbwHz: 1_000_000,
+  });
+  assert.notEqual(status, 200);
+  assert.match(JSON.stringify(body), /use only one/);
 });
 
 test('an address with no AXT600 behind it fails with a reason', async (t) => {
@@ -273,4 +334,6 @@ test('an address with no AXT600 behind it fails with a reason', async (t) => {
     { timeoutMs: 15_000, what: 'the unreachable unit being marked failed' }
   );
   assert.match(device.status.message, /No AXT600 is advertising at 127\.0\.0\.9/);
+  // and says which units it does hear, in case this one has moved
+  assert.match(device.status.message, /AXT600s heard on this network now: 127\.0\.0\.1 \(FOH AXT600\)/);
 });

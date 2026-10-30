@@ -56,6 +56,15 @@ const DATA_END = 0x1fffffff;
 const GRID_ORIGIN_HZ = 470_000_000;
 const GRID_HZ = 25_000;
 
+// The units this process has a session with, by component id and by address.
+// SoundBase can list one AXT600 twice (as found on the network and as added by
+// its IP); a second session to the same unit stalls both, so it is refused.
+const inUse = new Map(); // 'cid:<hex>' | 'host:<ip>' -> link
+
+function claimKeys(host, cid) {
+  return [cid ? `cid:${Buffer.from(cid).toString('hex')}` : null, host ? `host:${host}` : null].filter(Boolean);
+}
+
 export class Axt600NetworkLink {
   constructor({ host, cid = null, port = null, slp, log = () => {} }) {
     this.host = host;
@@ -75,19 +84,30 @@ export class Axt600NetworkLink {
     let cid = this.cid;
     let port = this.port;
     let name = null;
-    if (!cid || !port) {
-      const advert = await this.slp?.advertFor(this.host);
-      if (!advert && !cid) {
-        throw new SessionError(
-          `No AXT600 is advertising at ${this.host}. Check that it is switched on, that ` +
-            `its address is right, and that this computer is on the same network (subnet).`,
-          'not_found'
-        );
+    if (!port || !this.host) {
+      // a unit known by its component id is wherever it last announced itself;
+      // one known only by address is looked up there
+      const advert = cid
+        ? await this.slp?.advertForCid(cid)
+        : await this.slp?.advertFor(this.host);
+      if (advert) {
+        if (this.host && advert.host !== this.host) {
+          this.log(`the AXT600 is now at ${advert.host} (was ${this.host})`);
+        }
+        this.host = advert.host;
+        cid ??= advert.cid;
+        port ??= advert.port;
+        name = advert.uacn ?? null;
+      } else if (!cid || !this.host) {
+        const looking = cid
+          ? `The AXT600 with component ID ${cidToString(cid)} is not announcing itself on ` +
+            `any network this computer is on.`
+          : `No AXT600 is advertising at ${this.host}.`;
+        throw new SessionError(`${looking} ${this.#whatIsHeard()}`, 'not_found');
       }
-      cid ??= advert.cid;
-      port ??= advert?.port;
-      name = advert?.uacn ?? null;
     }
+
+    this.#claim(this.host, cid);
 
     this.session = new SdtSession({
       host: this.host,
@@ -102,7 +122,13 @@ export class Axt600NetworkLink {
     });
     this.session.onFatal = (err) => this.onFatal?.(err);
     this.session.onDmp = (items) => this.handleDmp(items);
-    await this.session.open();
+    try {
+      await this.session.open();
+    } catch (err) {
+      this.session = null;
+      this.#release();
+      throw err;
+    }
 
     const values = await this.session.get([P.MODEL, P.FIRMWARE]);
     const fw = values.get(P.FIRMWARE);
@@ -125,6 +151,36 @@ export class Axt600NetworkLink {
    * another controller, or by us before a retune — is stopped first, because
    * a unit refused every setting with DMP reason 5 when written mid-scan.
    */
+  /** What discovery can see right now, so a failure says what to fix. */
+  #whatIsHeard() {
+    const slp = this.slp;
+    if (!slp) return '';
+    if (slp.unavailable) {
+      return (
+        `This computer cannot listen for AXT600 adverts (${slp.unavailable}): another ` +
+        `program may be holding the port — quit Wireless Workbench and restart SoundBase.`
+      );
+    }
+    const heard = slp.devices();
+    if (heard.length) {
+      const list = heard.map((a) => `${a.host}${a.uacn && a.uacn !== a.fctn ? ` (${a.uacn})` : ''}`);
+      return (
+        `AXT600s heard on this network now: ${list.join(', ')}. If one of them is this ` +
+        `unit, its address has changed: pick it again in the device list, or set its IP ` +
+        `address in the device settings.`
+      );
+    }
+    const on = slp.listeningOn?.() ?? [];
+    return (
+      `No AXT600 at all is being heard` +
+      (on.length ? ` (listening on ${on.join(', ')})` : '') +
+      `. Check that it is switched on and cabled to this computer, that both are on the ` +
+      `same subnet — an address starting 169.254 means the unit or the computer found no ` +
+      `DHCP server and picked one itself — and, on Windows, that the firewall lets ` +
+      `SoundBase receive network traffic.`
+    );
+  }
+
   async configureScan({ startHz, stepHz, deviceCount }) {
     const startKhz = Math.round(startHz / 1000);
     const stepKhz = Math.round(stepHz / 1000);
@@ -235,10 +291,33 @@ export class Axt600NetworkLink {
     }
   }
 
+  #claimed = [];
+
+  #claim(host, cid) {
+    const keys = claimKeys(host, cid);
+    const holder = keys.map((k) => inUse.get(k)).find((l) => l && l !== this);
+    if (holder) {
+      throw new SessionError(
+        `This AXT600 (${host}) is already open in SoundBase under another device entry. ` +
+          `The same unit can appear twice in the list (found on the network and added by its IP): ` +
+          `use only one of them and close the other first.`,
+        'in_use'
+      );
+    }
+    for (const k of keys) inUse.set(k, this);
+    this.#claimed = keys;
+  }
+
+  #release() {
+    for (const k of this.#claimed) if (inUse.get(k) === this) inUse.delete(k);
+    this.#claimed = [];
+  }
+
   close() {
     this.onFatal = null;
     const session = this.session;
     this.session = null;
+    this.#release();
     session?.close();
   }
 

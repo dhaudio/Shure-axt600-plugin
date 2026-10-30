@@ -22,6 +22,7 @@ export const PLUGIN_DCID = '6F1B6C1E-4C7A-4E62-9D5B-A7F2C2B60600';
 export const SLP_GROUP = '239.255.254.253';
 export const SLP_PORT = 8427;
 const FORGET_AFTER_MS = 15_000;
+const REJOIN_MS = 5_000;
 
 /**
  * An SLPv2 attribute reply announcing a controller, in the layout Shure
@@ -76,14 +77,18 @@ export function parseAdvert(buf) {
  */
 export class SlpListener {
   #socket = null;
-  #seen = new Map(); // host -> { advert, at }
+  #seen = new Map(); // component id (hex) -> { advert, at }: a unit that moves keeps its entry
   #waiters = new Set();
   #starting = null;
+  #joined = new Set(); // local addresses whose interface has joined the group
+  #rejoin = null;
 
   constructor({ port = SLP_PORT, multicast = true, log = () => {} } = {}) {
     this.port = port;
     this.multicast = multicast;
     this.log = log;
+    /** why the listener could not start, if it could not */
+    this.unavailable = null;
   }
 
   start() {
@@ -93,25 +98,55 @@ export class SlpListener {
       socket.on('error', (err) => {
         // another program holding the port without SO_REUSEADDR: discovery is
         // then unavailable, but adding a unit by address still works
+        this.unavailable = err.message;
         this.log(`SLP listener unavailable: ${err.message}`);
         resolve(false);
       });
       socket.bind(this.port, () => {
-        if (this.multicast) {
-          for (const address of localIPv4s()) {
-            try {
-              socket.addMembership(SLP_GROUP, address);
-            } catch {
-              // an interface that cannot join is simply not listened on
-            }
-          }
-        }
         socket.unref();
         this.#socket = socket;
+        if (this.multicast) {
+          this.#joinInterfaces();
+          // An adapter plugged in, or readdressed, after SoundBase started has
+          // to join the group too, or its units are never heard.
+          this.#rejoin = setInterval(() => this.#joinInterfaces(), REJOIN_MS);
+          this.#rejoin.unref();
+        }
         resolve(true);
       });
     });
     return this.#starting;
+  }
+
+  #joinInterfaces() {
+    const socket = this.#socket;
+    if (!socket) return;
+    const current = new Set(localIPv4s());
+    for (const address of current) {
+      if (this.#joined.has(address)) continue;
+      try {
+        socket.addMembership(SLP_GROUP, address);
+        this.#joined.add(address);
+        this.log(`listening for AXT600 adverts on ${address}`);
+      } catch {
+        // an interface that cannot join is simply not listened on
+      }
+    }
+    // an address that went away; if it comes back it joins again
+    for (const address of [...this.#joined]) {
+      if (current.has(address)) continue;
+      try {
+        socket.dropMembership(SLP_GROUP, address);
+      } catch {
+        // already gone with its interface
+      }
+      this.#joined.delete(address);
+    }
+  }
+
+  /** The local addresses listened on, for diagnostics. */
+  listeningOn() {
+    return [...this.#joined];
   }
 
   /** AXT600s heard in the last few adverts. */
@@ -123,12 +158,27 @@ export class SlpListener {
   }
 
   /** The advert for this host, waiting for one if none has been heard yet. */
-  async advertFor(host, timeoutMs = 9_000) {
+  advertFor(host, timeoutMs = 9_000) {
+    return this.#lookup((a) => a.host === host, timeoutMs);
+  }
+
+  /**
+   * The current advert of the unit with this component id, wherever it is now —
+   * its address is whatever it last announced.
+   */
+  advertForCid(cid, timeoutMs = 9_000) {
+    return this.#lookup((a) => a.cid.equals(cid), timeoutMs);
+  }
+
+  async #lookup(match, timeoutMs) {
     await this.start();
-    const known = this.#seen.get(host);
-    if (known && Date.now() - known.at < FORGET_AFTER_MS) return known.advert;
+    const now = Date.now();
+    const known = [...this.#seen.values()]
+      .filter((s) => now - s.at < FORGET_AFTER_MS && match(s.advert))
+      .sort((a, b) => b.at - a.at)[0];
+    if (known) return known.advert;
     return new Promise((resolve) => {
-      const waiter = { host, resolve };
+      const waiter = { match, resolve };
       waiter.timer = setTimeout(() => {
         this.#waiters.delete(waiter);
         resolve(null);
@@ -166,6 +216,9 @@ export class SlpListener {
   }
 
   close() {
+    clearInterval(this.#rejoin);
+    this.#rejoin = null;
+    this.#joined.clear();
     for (const w of this.#waiters) {
       clearTimeout(w.timer);
       w.resolve(null);
@@ -183,9 +236,9 @@ export class SlpListener {
   #heard(msg) {
     const advert = parseAdvert(msg);
     if (!advert) return;
-    this.#seen.set(advert.host, { advert, at: Date.now() });
+    this.#seen.set(advert.cid.toString('hex'), { advert, at: Date.now() });
     for (const w of [...this.#waiters]) {
-      if (w.host === advert.host) {
+      if (w.match(advert)) {
         clearTimeout(w.timer);
         this.#waiters.delete(w);
         w.resolve(advert);

@@ -29,6 +29,10 @@ del software de Shure. Cualquier implementación de E1.17 puede hablar con él.
 (device-description=$:tftp://192.168.1.3/$.ddl),(csl-esta.dmp.values=version:1_interfaceId:48)
 ```
 
+El plugin identifica cada equipo por su CID (`acn:<CID>` en SoundBase), que
+no cambia aunque se le cambie la IP, y busca su dirección actual en los
+anuncios.
+
 El CID empieza por los cuatro últimos bytes de la MAC (MAC `00:0e:a1:b2:c3:d4` → CID `A1B2C3D4-…`), seguidos de
 un sufijo fijo.
 

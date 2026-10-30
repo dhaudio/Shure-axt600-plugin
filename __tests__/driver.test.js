@@ -13,7 +13,13 @@ import {
 } from '../driver/scan-plan.js';
 import { SweepAssembler } from '../driver/sweep-assembler.js';
 import { SimulatedAxt600 } from '../driver/simulated-axt600.js';
-import { Axt600NetworkLink, createLink, isSimulated } from '../driver/link.js';
+import {
+  Axt600NetworkLink,
+  cidFromDeviceId,
+  createLink,
+  deviceIdFor,
+  isSimulated,
+} from '../driver/link.js';
 import { SdtSession, interfacesFacing } from '../driver/sdt-session.js';
 import { SlpListener, buildAdvert, parseAdvert } from '../driver/slp.js';
 import { startFakeAxt600 } from '../driver/fake-axt600.js';
@@ -138,6 +144,79 @@ test('a tile off the plan axis, or a garbage reading, is never drawn', () => {
   assert.equal(sweeps[0][0], -90);
 });
 
+test('progressive mode draws each piece as it arrives, over the previous pass', async () => {
+  const sweeps = [];
+  const asm = new SweepAssembler(smallPlan(), (a, info) => sweeps.push({ a, info }), {
+    progressive: true,
+    intervalMs: 20,
+  });
+  asm.add(tile(0, Array(6).fill(-90)));
+  asm.passEnd(); // a complete first pass
+  assert.equal(sweeps.length, 1);
+  assert.equal(sweeps[0].info.complete, true);
+
+  asm.add(tile(0, [-40])); // a carrier appears at the start of the next pass
+  await delay(40);
+  assert.equal(sweeps.length, 2, 'drawn before the pass ends');
+  assert.equal(sweeps[1].info.complete, false);
+  assert.deepEqual(sweeps[1].a, [-40, -90, -90, -90, -90, -90]);
+
+  asm.add(tile(1, [-91]));
+  asm.add(tile(2, [-92])); // two pieces inside one interval: one emit
+  await delay(40);
+  assert.equal(sweeps.length, 3);
+  asm.dispose();
+});
+
+test('a pass end replaces a pending progressive emit', async () => {
+  const sweeps = [];
+  const asm = new SweepAssembler(smallPlan(), (a, info) => sweeps.push(info), {
+    progressive: true,
+    intervalMs: 50,
+  });
+  asm.add(tile(0, Array(6).fill(-90)));
+  asm.passEnd();
+  await delay(80);
+  assert.deepEqual(sweeps.map((i) => i.complete), [true]);
+});
+
+test('with progressive on, the adapter traces before the first pass completes', async () => {
+  process.env.SB_AXT600_SIM_TIMESCALE = '0.05'; // a 9.4 s pass in ~470 ms
+  const adapter = createSpectrumAnalyzerAdapter({ id: 'sim:axt600' });
+  await adapter.open();
+  const applied = await adapter.applyConfig({ startHz: 470e6, stopHz: 616e6, rbwHz: 200e3 });
+  assert.equal(applied.controls.progressive, true);
+  const at = [];
+  const started = Date.now();
+  await adapter.startSweep(() => at.push(Date.now() - started));
+  while (at.length < 3) await delay(10);
+  await adapter.stopSweep();
+  await adapter.close();
+  process.env.SB_AXT600_SIM_TIMESCALE = '0.002';
+  assert.ok(at[0] < 400, `first trace after ${at[0]} ms, before the ~470 ms pass`);
+});
+
+test('turning progressive off traces only complete passes', async () => {
+  process.env.SB_AXT600_SIM_TIMESCALE = '0.05';
+  const adapter = createSpectrumAnalyzerAdapter({ id: 'sim:axt600' });
+  await adapter.open();
+  const applied = await adapter.applyConfig({
+    startHz: 470e6,
+    stopHz: 616e6,
+    rbwHz: 200e3,
+    controls: { progressive: false },
+  });
+  assert.equal(applied.controls.progressive, false);
+  const at = [];
+  const started = Date.now();
+  await adapter.startSweep(() => at.push(Date.now() - started));
+  while (at.length < 1) await delay(10);
+  await adapter.stopSweep();
+  await adapter.close();
+  process.env.SB_AXT600_SIM_TIMESCALE = '0.002';
+  assert.ok(at[0] >= 400, `first trace after ${at[0]} ms: a whole pass`);
+});
+
 // ---------------------------------------------------------------------------
 // SLP
 // ---------------------------------------------------------------------------
@@ -158,6 +237,36 @@ test('a real AXT600 advert parses to its address, port and component id', () => 
   assert.equal(advert.fctn, 'AXT600');
   assert.equal(advert.cid.toString('hex'), 'a1b2c3d4000011dda000000eddcccccc');
   assert.equal(parseAdvert(Buffer.from('(acn-fctn=WWB6)')), null);
+});
+
+test('a unit is found by its component id at whatever address it announces', async () => {
+  const dgram = await import('node:dgram');
+  const port = await freePort();
+  const slp = new SlpListener({ port, multicast: false });
+  await slp.start();
+  const tell = (host) =>
+    new Promise((r) => {
+      const s = dgram.createSocket('udp4');
+      const ad = Buffer.from(REAL_ADVERT.toString('latin1').replaceAll('192.168.1.3', host), 'latin1');
+      s.send(ad, port, '127.0.0.1', () => s.close(r));
+    });
+  const cid = parseAdvert(REAL_ADVERT).cid;
+  await tell('192.168.1.3');
+  await delay(20);
+  assert.equal((await slp.advertForCid(cid, 100)).host, '192.168.1.3');
+  await tell('192.168.3.3'); // the same unit, moved to another network
+  await delay(20);
+  assert.equal((await slp.advertForCid(cid, 100)).host, '192.168.3.3');
+  assert.equal(slp.devices().length, 1, 'still one unit');
+  assert.equal(await slp.advertForCid(Buffer.alloc(16), 50), null);
+  slp.close();
+});
+
+test('device ids carry the component id and survive a round trip', () => {
+  const cid = Buffer.from('a1b2c3d4000011dda000000eddcccccc', 'hex');
+  assert.equal(deviceIdFor(cid), 'acn:a1b2c3d4000011dda000000eddcccccc');
+  assert.ok(cidFromDeviceId(deviceIdFor(cid)).equals(cid));
+  assert.equal(cidFromDeviceId('net:192.168.3.3'), null);
 });
 
 // ---------------------------------------------------------------------------
@@ -331,6 +440,24 @@ test('the link finds the unit by its advert and scans it', async (t) => {
   assert.equal(sweeps[0].length, 731);
 });
 
+test('one unit listed twice (by id and by address) is opened only once', async (t) => {
+  // SoundBase showed the same AXT600 as acn:… and net:…; opening both stalled both
+  const slpPort = await freePort();
+  const unit = await startFakeAxt600({ slpPort });
+  const slp = new SlpListener({ port: slpPort, multicast: false });
+  t.after(async () => {
+    slp.close();
+    await unit.close();
+  });
+  const byId = new Axt600NetworkLink({ cid: unit.cid, slp });
+  const byAddress = new Axt600NetworkLink({ host: unit.host, slp });
+  await byId.connect();
+  await assert.rejects(byAddress.connect(), (err) => err.code === 'in_use' && /use only one/.test(err.message));
+  byId.close();
+  await byAddress.connect(); // free again once the first is closed
+  byAddress.close();
+});
+
 test('a unit left scanning is stopped before the scan settings are written', async (t) => {
   // a real AXT600 refused every scan setting with DMP reason 5 in this state
   const unit = await startFakeAxt600({ scanningAtStart: true });
@@ -455,7 +582,9 @@ test('a slow scan shows a filling notice until its first sweep', async () => {
   await adapter.startSweep(() => (traces += 1));
   assert.equal(warnings.at(-1)[0].id, 'scan-filling');
   assert.match(warnings.at(-1)[0].message, /64 s/);
-  while (traces < 1) await delay(10);
+  // progressive traces keep the notice; the first complete pass clears it
+  while (warnings.at(-1).length) await delay(10);
+  assert.ok(traces >= 1);
   assert.deepEqual(warnings.at(-1), []);
   await adapter.stopSweep();
   await adapter.close();
@@ -473,6 +602,49 @@ test('a dropped link is reported as fatal', async () => {
   assert.equal(fatal.length, 1);
   assert.match(fatal[0].message, /lost the connection/);
   await adapter.close();
+});
+
+test('a device known only by its component id needs no address', () => {
+  assert.doesNotThrow(() =>
+    createSpectrumAnalyzerAdapter({ id: 'acn:a1b2c3d4000011dda000000eddcccccc' })
+  );
+});
+
+test('the link finds a unit by component id alone', async (t) => {
+  const slpPort = await freePort();
+  const unit = await startFakeAxt600({ slpPort });
+  const slp = new SlpListener({ port: slpPort, multicast: false });
+  t.after(async () => {
+    slp.close();
+    await unit.close();
+  });
+  const link = new Axt600NetworkLink({ host: null, cid: unit.cid, slp });
+  const identity = await link.connect();
+  assert.equal(identity.model, 'AXT600');
+  assert.equal(link.host, unit.host);
+  link.close();
+});
+
+test('when nothing is heard, the error says what to check', async (t) => {
+  const port = await freePort();
+  const slp = new SlpListener({ port, multicast: false });
+  t.after(() => slp.close());
+  const link = new Axt600NetworkLink({ host: '169.254.22.126', slp });
+  link.slp.advertFor = async () => null; // no waiting nine seconds in a test
+  await assert.rejects(link.connect(), (err) => {
+    assert.match(err.message, /No AXT600 is advertising at 169\.254\.22\.126/);
+    assert.match(err.message, /No AXT600 at all is being heard/);
+    assert.match(err.message, /169\.254 means/);
+    return true;
+  });
+});
+
+test('when the listener cannot start, the error says so', async () => {
+  const link = new Axt600NetworkLink({
+    host: '192.168.3.3',
+    slp: { unavailable: 'bind EADDRINUSE 0.0.0.0:8427', advertFor: async () => null, devices: () => [] },
+  });
+  await assert.rejects(link.connect(), /cannot listen for AXT600 adverts \(bind EADDRINUSE.*Wireless Workbench/);
 });
 
 test('a device with no address says so', () => {

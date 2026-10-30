@@ -13,6 +13,11 @@
 // A point the unit never reported in a pass is filled with the lowest level
 // seen in that pass, so the trace stays drawable without inventing a signal,
 // and the gaps are reported so the user can be told.
+//
+// Progressive mode also emits during the pass, at most every `intervalMs`:
+// the points refreshed so far in this pass, and the previous pass's values
+// for the rest. A point not yet seen at all (only in the first pass) shows the
+// lowest level seen so far. Those emits carry `complete: false`.
 
 import { decimate } from './scan-plan.js';
 
@@ -21,9 +26,13 @@ export class SweepAssembler {
    * @param plan    from planScan()
    * @param onSweep (amplitudesDbm, { missing: [[fromHz, toHz], …] }) per pass
    */
-  constructor(plan, onSweep) {
+  constructor(plan, onSweep, { progressive = false, intervalMs = 750 } = {}) {
     this.plan = plan;
     this.onSweep = onSweep;
+    this.progressive = progressive;
+    this.intervalMs = intervalMs;
+    this.timer = null;
+    this.lastEmit = 0;
     this.values = new Array(plan.deviceCount).fill(Number.NaN);
     this.fresh = new Uint8Array(plan.deviceCount);
     this.passes = 0;
@@ -58,6 +67,32 @@ export class SweepAssembler {
       this.values[index] = v;
       this.fresh[index] = 1;
     }
+    if (this.progressive) this.#schedule();
+  }
+
+  /** Stop any pending progressive emit (the scan stopped or was retuned). */
+  dispose() {
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.progressive = false;
+  }
+
+  #schedule() {
+    if (this.timer) return;
+    const wait = Math.max(0, this.lastEmit + this.intervalMs - Date.now());
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.#emitPartial();
+    }, wait);
+  }
+
+  #emitPartial() {
+    let floor = Infinity;
+    for (const v of this.values) if (v < floor) floor = v;
+    if (!Number.isFinite(floor)) return;
+    const merged = this.values.map((v) => (Number.isNaN(v) ? floor : v));
+    this.lastEmit = Date.now();
+    this.onSweep(decimate(merged, this.plan), { missing: [], complete: false });
   }
 
   /** The pass is over: emit it, if anything at all arrived. */
@@ -78,8 +113,11 @@ export class SweepAssembler {
       return floor;
     });
 
+    clearTimeout(this.timer);
+    this.timer = null;
     this.passes += 1;
     this.fresh.fill(0);
-    this.onSweep(decimate(filled, this.plan), { missing });
+    this.lastEmit = Date.now();
+    this.onSweep(decimate(filled, this.plan), { missing, complete: true });
   }
 }
