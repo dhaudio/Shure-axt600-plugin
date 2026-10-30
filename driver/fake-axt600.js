@@ -50,6 +50,7 @@ export async function startFakeAxt600({
   scanningAtStart = false, // as if another controller left it scanning
   ignoreJoins = 0, // drop this many JOINs, as a unit that has not heard of us
   onlyFrom = null, // hear only this source address, as a unit on one network of two
+  refuseStarts = 0, // refuse this many scan starts with reason 5, as a unit still busy
 } = {}) {
   const cid = Buffer.concat([randomBytes(4), Buffer.from('000011dda000000eddcccccc', 'hex')]);
   const socket = dgram.createSocket('udp4');
@@ -216,6 +217,13 @@ export async function startFakeAxt600({
         case DMP.SET:
           // a real unit refused the scan settings with reason 5 while scanning
           if (scanning && item.address >= 0x01070100 && item.address <= 0x01070109 && item.address !== 0x01070103) {
+            state.refused = (state.refused ?? 0) + 1;
+            replies.push(pdu(DMP.SET_FAIL, 1, Buffer.from([0x02]), Buffer.concat([u32(item.address), Buffer.from([5])])));
+            break;
+          }
+          // a real unit refused the start itself, after a SoundBase update mid-scan
+          if (item.address === 0x01070103 && refuseStarts > 0) {
+            refuseStarts -= 1;
             state.refused = (state.refused ?? 0) + 1;
             replies.push(pdu(DMP.SET_FAIL, 1, Buffer.from([0x02]), Buffer.concat([u32(item.address), Buffer.from([5])])));
             break;

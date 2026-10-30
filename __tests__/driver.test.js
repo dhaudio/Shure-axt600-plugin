@@ -458,6 +458,32 @@ test('one unit listed twice (by id and by address) is opened only once', async (
   byAddress.close();
 });
 
+test('a refused scan start is retried once after stopping the unit', async (t) => {
+  // a real AXT600 refused 0x01070103 with reason 5 right after a SoundBase update
+  const unit = await startFakeAxt600({ refuseStarts: 1 });
+  t.after(() => unit.close());
+  const link = new Axt600NetworkLink({ host: unit.host, cid: unit.cid, port: unit.port });
+  t.after(() => link.close());
+  await link.connect();
+  await link.configureScan(planScan({ startHz: 470e6, stopHz: 616e6, rbwHz: 1e6 }));
+  await link.startScan(() => {}, () => {});
+  assert.equal(unit.state.refused, 1);
+  assert.equal(unit.scanning, true);
+});
+
+test('a scan start refused twice says what is holding the unit', async (t) => {
+  const unit = await startFakeAxt600({ refuseStarts: 2 });
+  t.after(() => unit.close());
+  const link = new Axt600NetworkLink({ host: unit.host, cid: unit.cid, port: unit.port });
+  t.after(() => link.close());
+  await link.connect();
+  await link.configureScan(planScan({ startHz: 470e6, stopHz: 616e6, rbwHz: 1e6 }));
+  await assert.rejects(
+    link.startScan(() => {}, () => {}),
+    (err) => err.code === 'scan_refused' && /Wireless Workbench/.test(err.message)
+  );
+});
+
 test('a unit left scanning is stopped before the scan settings are written', async (t) => {
   // a real AXT600 refused every scan setting with DMP reason 5 in this state
   const unit = await startFakeAxt600({ scanningAtStart: true });
