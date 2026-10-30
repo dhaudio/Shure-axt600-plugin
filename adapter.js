@@ -50,7 +50,7 @@ const simTimeScale = () => {
  * (or SB_AXT600_MOCK=1) asks for it. Listening sends nothing.
  */
 export async function discoverDevices(pluginConfig = {}) {
-  const slp = slpListener((m) => logLine('warn', m));
+  const slp = slpListener((m) => logLine('info', m));
   await slp.start();
   const found = slp.devices().map((advert) => ({
     // the component id, not the address: a unit moved to another IP is still
