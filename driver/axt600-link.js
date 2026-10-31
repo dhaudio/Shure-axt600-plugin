@@ -55,7 +55,7 @@ export const P = {
 const DATA_END = 0x1fffffff;
 const GRID_ORIGIN_HZ = 470_000_000;
 const GRID_HZ = 25_000;
-const START_RETRY_MS = 1_000;
+const START_RETRY_MS = [500, 1_000, 2_000]; // waits between attempts to start a scan
 
 // The units this process has a session with, by component id and by address.
 // SoundBase can list one AXT600 twice (as found on the network and as added by
@@ -235,31 +235,38 @@ export class Axt600NetworkLink {
     this.lastProgress = null;
     await this.#watchScanState();
     await this.session.subscribe([P.SCAN_DATA_SUB]);
-    try {
-      await this.session.set([[P.SCAN_GO, u8(0)]]);
-    } catch (err) {
-      if (err.code !== 'set_refused') throw err;
-      // A unit still busy with an earlier session (one left behind by a
-      // SoundBase that was closed or updated mid-scan) refused the start with
-      // reason 5: stop whatever it is doing, give it a moment, try once more.
-      const state = await this.#readScanState();
-      this.log(`${err.message}; scan state ${JSON.stringify(state)}; stopping and retrying`);
-      await this.#stopAndWait();
-      await new Promise((r) => setTimeout(r, START_RETRY_MS));
+    // A unit that has just stopped, or just taken new scan settings, can still
+    // be winding down and refuses the start with reason 5 (seen on a real
+    // AXT600 after changing the RBW). Make sure it is stopped, give it a
+    // moment, and try again, a few times, before giving up.
+    for (let attempt = 0; ; attempt += 1) {
       try {
         await this.session.set([[P.SCAN_GO, u8(0)]]);
-      } catch (again) {
-        if (again.code !== 'set_refused') throw again;
-        throw new SessionError(
-          `The AXT600 refused to start scanning (${again.reasons}). It is still busy with ` +
-            `another controller: quit Wireless Workbench on every computer on this network. ` +
-            `If SoundBase was just closed or updated, wait 30 s, or power-cycle the AXT600, ` +
-            `and start the scan again.`,
-          'scan_refused'
-        );
+        break;
+      } catch (err) {
+        if (err.code !== 'set_refused') throw err;
+        if (attempt >= START_RETRY_MS.length) {
+          throw new SessionError(
+            `The AXT600 refused to start scanning (${err.reasons}). It is still busy with ` +
+              `another controller: quit Wireless Workbench on every computer on this network. ` +
+              `If SoundBase was just closed or updated, wait 30 s, or power-cycle the AXT600, ` +
+              `and start the scan again.`,
+            'scan_refused'
+          );
+        }
+        const state = await this.#readScanState();
+        this.log(`${err.message}; scan state ${JSON.stringify(state)}; retrying the start`);
+        if (state.running) await this.#stopAndWait();
+        await new Promise((r) => setTimeout(r, START_RETRY_MS[attempt]));
       }
     }
     this.log('scan started');
+  }
+
+  /** Stop handing scan data on, without telling the unit anything. */
+  detach() {
+    this.onTile = null;
+    this.onPassEnd = null;
   }
 
   /** The scan-state properties Wireless Workbench reads before a scan. */

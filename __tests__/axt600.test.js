@@ -239,6 +239,38 @@ test('retuning while sweeping moves the trace to the new range', async (t) => {
   assert.equal(unit.scan.startKhz, 600_000);
 });
 
+test('changing the RBW while sweeping keeps the scan going on a unit slow to stop', async (t) => {
+  // A real AXT600 refused the start (reason 5) right after a stop, and
+  // SoundBase looked hung after every RBW change until it was restarted.
+  unit.busyAfterStopMs = 300;
+  t.after(() => (unit.busyAfterStopMs = 0));
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 1_000_000 });
+  await sweeping(t);
+  let last = await traceAfter();
+  for (const rbwHz of [200_000, 1_000_000, 200_000]) {
+    const { status, body } = await configure({ rbwHz });
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.equal(body.rbwHz, rbwHz);
+    last = await traceAfter(last.body.sweepId);
+    assert.equal(unit.scan.stepKhz, rbwHz / 1000);
+  }
+  assert.equal(unit.scanning, true);
+});
+
+test('a unit that stops sending scan data has its scan restarted', async (t) => {
+  process.env.SB_AXT600_STALL_MS = '400';
+  t.after(() => delete process.env.SB_AXT600_STALL_MS);
+  await configure({ startHz: START_HZ, stopHz: STOP_HZ, rbwHz: 1_000_000 });
+  await request('POST', `${DEVICE_PATH}/sweep/stop`); // the watchdog starts with the sweep
+  await sweeping(t);
+  const before = await traceAfter();
+  unit.stall();
+  await delay(300);
+  const stuck = (await request('GET', `${DEVICE_PATH}/trace`)).body.sweepId;
+  const after = await traceAfter(stuck);
+  assert.ok(after.body.sweepId > before.body.sweepId, 'traces come again after the restart');
+});
+
 test('the progressive control is declared and echoed', async () => {
   const caps = (await listed()).capabilities;
   const control = caps.controls.find((c) => c.id === 'progressive');

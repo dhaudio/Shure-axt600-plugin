@@ -51,6 +51,7 @@ export async function startFakeAxt600({
   ignoreJoins = 0, // drop this many JOINs, as a unit that has not heard of us
   onlyFrom = null, // hear only this source address, as a unit on one network of two
   refuseStarts = 0, // refuse this many scan starts with reason 5, as a unit still busy
+  busyAfterStopMs = 0, // refuse a start this soon after a stop, as a unit still winding down
 } = {}) {
   const cid = Buffer.concat([randomBytes(4), Buffer.from('000011dda000000eddcccccc', 'hex')]);
   const socket = dgram.createSocket('udp4');
@@ -222,8 +223,8 @@ export async function startFakeAxt600({
             break;
           }
           // a real unit refused the start itself, after a SoundBase update mid-scan
-          if (item.address === 0x01070103 && refuseStarts > 0) {
-            refuseStarts -= 1;
+          if (item.address === 0x01070103 && (refuseStarts > 0 || Date.now() - stoppedAt < busyAfterStopMs)) {
+            if (refuseStarts > 0) refuseStarts -= 1;
             state.refused = (state.refused ?? 0) + 1;
             replies.push(pdu(DMP.SET_FAIL, 1, Buffer.from([0x02]), Buffer.concat([u32(item.address), Buffer.from([5])])));
             break;
@@ -255,12 +256,17 @@ export async function startFakeAxt600({
   function startScan() {
     if (scanning) return;
     scanning = true;
+    stalled = false;
     event(0x01070110, Buffer.from([0]));
     event(0x01070131, Buffer.from([1]));
     pass();
   }
 
+  let stoppedAt = 0;
+  let stalled = false;
+
   function stopScan() {
+    stoppedAt = Date.now();
     if (!scanning) return;
     scanning = false;
     for (const t of timers) clearTimeout(t);
@@ -269,7 +275,7 @@ export async function startFakeAxt600({
   }
 
   function pass() {
-    if (!scanning) return;
+    if (!scanning || stalled) return;
     const stepHz = scan.stepKhz * 1000;
     const startHz = scan.startKhz * 1000;
     const count = Math.floor((scan.stopKhz - scan.startKhz) / scan.stepKhz) + 1;
@@ -357,7 +363,16 @@ export async function startFakeAxt600({
     get scanning() {
       return scanning;
     },
+    set busyAfterStopMs(ms) {
+      busyAfterStopMs = ms;
+    },
     /** stop answering altogether, as a unit that is unplugged */
+    /** keep reporting a scan in progress but send no more data, as a stuck unit */
+    stall() {
+      stalled = true;
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+    },
     silence() {
       stopScan();
       clearInterval(keepalive);

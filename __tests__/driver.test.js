@@ -471,8 +471,8 @@ test('a refused scan start is retried once after stopping the unit', async (t) =
   assert.equal(unit.scanning, true);
 });
 
-test('a scan start refused twice says what is holding the unit', async (t) => {
-  const unit = await startFakeAxt600({ refuseStarts: 2 });
+test('a scan start refused every time says what is holding the unit', async (t) => {
+  const unit = await startFakeAxt600({ refuseStarts: 4 });
   t.after(() => unit.close());
   const link = new Axt600NetworkLink({ host: unit.host, cid: unit.cid, port: unit.port });
   t.after(() => link.close());

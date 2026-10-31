@@ -123,6 +123,12 @@ export class SimulatedAxt600 {
     this.#clearTimers();
   }
 
+  /** Before a restart with new settings: the old pass stops feeding the trace. */
+  detach() {
+    this.#running = false;
+    this.#clearTimers();
+  }
+
   close() {
     this.onFatal = null; // a close we asked for is not a failure
     this.#running = false;

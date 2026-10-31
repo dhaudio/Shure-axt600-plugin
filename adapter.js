@@ -33,6 +33,9 @@ export const SIMULATED_DEVICE_ID = 'sim:axt600';
 
 /** A scan this slow gets an "it is filling in" notice until the first pass. */
 const FILLING_NOTICE_MS = 5_000;
+// No scan data for this long while sweeping: the scan is restarted once, then
+// the device is reported failed so SoundBase reconnects it.
+const stallMs = () => Number(process.env.SB_AXT600_STALL_MS) || 20_000;
 
 const MHZ = (hz) => (hz / 1e6).toFixed(3);
 const logLine = (level, message) =>
@@ -93,6 +96,10 @@ class Axt600Adapter {
     this.onTrace = null;
     this.sweeping = false;
     this.warnings = [];
+    this.lastDataAt = 0;
+    this.watchdog = null;
+    this.retuning = false;
+    this.restartedForStall = false;
     /** assigned by the shell */
     this.onFatal = null;
     this.onWarnings = null;
@@ -159,20 +166,18 @@ class Axt600Adapter {
     // and a request that changes nothing it sweeps (a trace mode, a control)
     // must leave the scan running.
     if (differs(plan, this.plan)) {
-      const settled = await this.link.configureScan({
-        startHz: plan.startHz,
-        stepHz: plan.stepHz,
-        deviceCount: plan.deviceCount,
-      });
-      // if the unit settled on something else, the trace follows the unit
-      if (settled.stepHz !== plan.stepHz || settled.startHz !== plan.startHz) {
-        plan = planScan(
-          { startHz: settled.startHz, stopHz: plan.requestedStopHz, rbwHz: settled.stepHz },
-          plan
-        );
+      this.retuning = true;
+      try {
+        plan = await this.#retune(plan);
+      } catch (err) {
+        // A retune that fails halfway leaves the unit stopped while SoundBase
+        // still waits for traces: it looked hung until SoundBase was
+        // restarted. Report it, so SoundBase reconnects with the new settings.
+        if (this.sweeping) this.#fail(err);
+        throw err;
+      } finally {
+        this.retuning = false;
       }
-      this.plan = plan;
-      if (this.sweeping) await this.#restartScan();
     } else {
       this.plan = plan;
       if (this.sweeping && this.assembler && before.progressive !== this.controls.progressive) {
@@ -195,16 +200,85 @@ class Axt600Adapter {
     return effective;
   }
 
+  async #retune(plan) {
+    const settled = await this.link.configureScan({
+      startHz: plan.startHz,
+      stepHz: plan.stepHz,
+      deviceCount: plan.deviceCount,
+    });
+    // if the unit settled on something else, the trace follows the unit
+    if (settled.stepHz !== plan.stepHz || settled.startHz !== plan.startHz) {
+      plan = planScan({ startHz: settled.startHz, stopHz: plan.requestedStopHz, rbwHz: settled.stepHz }, plan);
+    }
+    this.plan = plan;
+    // configureScan has just stopped the unit: start it again straight away,
+    // without a second stop (a stop right before the start made a real unit
+    // refuse the start with reason 5)
+    if (this.sweeping) {
+      this.link.detach();
+      await this.#beginScan();
+    }
+    return plan;
+  }
+
+  #fail(err) {
+    this.#stopWatchdog();
+    this.sweeping = false;
+    this.assembler?.dispose();
+    this.assembler = null;
+    this.onFatal?.(err);
+  }
+
+  #startWatchdog() {
+    this.#stopWatchdog();
+    this.lastDataAt = Date.now();
+    const every = Math.max(50, Math.min(5_000, stallMs() / 4));
+    this.watchdog = setInterval(() => this.#checkStall(), every);
+    this.watchdog.unref?.();
+  }
+
+  #stopWatchdog() {
+    clearInterval(this.watchdog);
+    this.watchdog = null;
+  }
+
+  async #checkStall() {
+    if (!this.sweeping || this.retuning || this.checkingStall) return;
+    if (Date.now() - this.lastDataAt < stallMs()) return;
+    this.checkingStall = true;
+    try {
+      if (this.restartedForStall) {
+        this.#fail(new Error(
+          `The AXT600 stopped sending scan data and did not recover. Check that ` +
+            `Wireless Workbench is not scanning with it, then reconnect it.`
+        ));
+        return;
+      }
+      this.restartedForStall = true;
+      logLine('warn', `[${this.device.id}] no scan data for ${Math.round(stallMs() / 1000)} s: restarting the scan`);
+      this.lastDataAt = Date.now();
+      await this.link.stopScan();
+      if (this.sweeping) await this.#beginScan();
+    } catch (err) {
+      if (this.sweeping) this.#fail(err);
+    } finally {
+      this.checkingStall = false;
+    }
+  }
+
   async startSweep(onTrace) {
     if (this.sweeping) return;
     if (!this.plan) await this.applyConfig({});
     this.onTrace = onTrace;
     this.sweeping = true;
+    this.restartedForStall = false;
     await this.#beginScan();
+    this.#startWatchdog();
   }
 
   async stopSweep() {
     this.sweeping = false;
+    this.#stopWatchdog();
     await this.link?.stopScan();
     this.assembler?.dispose();
     this.assembler = null;
@@ -216,6 +290,7 @@ class Axt600Adapter {
 
   async close() {
     this.sweeping = false;
+    this.#stopWatchdog();
     this.assembler?.dispose();
     this.assembler = null;
     this.link?.close();
@@ -259,15 +334,15 @@ class Axt600Adapter {
       });
     }
 
+    this.lastDataAt = Date.now();
     await this.link.startScan(
-      (tile) => assembler.add(tile),
+      (tile) => {
+        this.lastDataAt = Date.now();
+        if (this.restartedForStall && this.assembler === assembler) this.restartedForStall = false;
+        assembler.add(tile);
+      },
       () => assembler.passEnd()
     );
-  }
-
-  async #restartScan() {
-    await this.link.stopScan();
-    await this.#beginScan();
   }
 
   /** The trace's frequency axis, after any coarsening of a long scan. */
